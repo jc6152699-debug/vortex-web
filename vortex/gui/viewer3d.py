@@ -34,6 +34,18 @@ def ratio_to_color(ratio: float) -> tuple:
     return (0.9, 0.15 * (1 - over), 0.15 * (1 - over), 1.0)
 
 
+def heat_color(t: float) -> tuple:
+    """Escala de calor azul->amarillo->rojo para un valor normalizado
+    t en [0,1] (usada para colorear por magnitud de fuerza/esfuerzo, en
+    vez de por relación demanda/capacidad)."""
+    t = min(max(t, 0.0), 1.0)
+    if t <= 0.5:
+        u = t / 0.5
+        return (0.15 + 0.75 * u, 0.35 + 0.5 * u, 0.85 - 0.75 * u, 1.0)
+    u = (t - 0.5) / 0.5
+    return (0.9, 0.85 - 0.70 * u, 0.1 * (1 - u), 1.0)
+
+
 class Viewer3D(gl.GLViewWidget):
     memberClicked = QtCore.Signal(int)
 
@@ -75,6 +87,29 @@ class Viewer3D(gl.GLViewWidget):
         for mid, item in self._member_items.items():
             if mid in ratios:
                 item.setData(color=ratio_to_color(ratios[mid]))
+
+    def color_by_heat(self, values: Dict[int, float]) -> None:
+        """Colorea por magnitud relativa (0=mínimo azul, 1=máximo rojo),
+        normalizando `values` (p.ej. fuerza axial o momento) a [0,1] por
+        separado dentro de cada tipo de elemento (parales entre sí, vigas
+        entre sí), para que ambos grupos usen su propio rango de "calor"."""
+        if self._model is None or not values:
+            return
+        by_kind: Dict[MemberKind, list] = {}
+        for mid, v in values.items():
+            member = self._model.members.get(mid)
+            if member is None:
+                continue
+            by_kind.setdefault(member.kind, []).append((mid, v))
+        for kind, items in by_kind.items():
+            vals = [v for _, v in items]
+            vmin, vmax = min(vals), max(vals)
+            span = (vmax - vmin) or 1.0
+            for mid, v in items:
+                t = (v - vmin) / span
+                item = self._member_items.get(mid)
+                if item is not None:
+                    item.setData(color=heat_color(t))
 
     def color_by_kind(self) -> None:
         if self._model is None:

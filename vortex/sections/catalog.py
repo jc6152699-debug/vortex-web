@@ -118,6 +118,7 @@ def lipped_channel_upright(
     thickness: float,
     material: Material,
     perforation_ratio: float = 0.85,
+    kind: SectionKind = SectionKind.CFS_UPRIGHT,
 ) -> Section:
     """
     Perfil típico de paral: canal con labios rigidizadores (C con
@@ -143,7 +144,7 @@ def lipped_channel_upright(
     ]
     sec = thin_wall_open_section(
         name, points, thickness, material,
-        kind=SectionKind.CFS_UPRIGHT, perforation_ratio=perforation_ratio,
+        kind=kind, perforation_ratio=perforation_ratio,
     )
     # Segmentos planos para ancho efectivo (NSR-10 F.4.2.2): el alma es un
     # elemento rigidizado por un ala en cada borde longitudinal (k=4,
@@ -270,10 +271,30 @@ def default_catalog() -> dict:
         thickness=0.0020, material=a36, kind=SectionKind.BRACE_ANGLE,
     )
 
+    # Secciones reales tomadas del plano de fabricación RIOSTRA_Y_VIGA.pdf
+    # (LOGIBOT, "RACK RODILLERA 2 NIVELES - SENCILLO", Autodesk Inventor,
+    # lámina 1/5). Cotas leídas del plano acotado (a línea media de pared):
+    #   RIOSTRA: canal con labios, alma=40mm, ala=25mm, labio=10mm, t=1.5mm
+    #   VIGA: perfil de 130mm de alto x 60mm de ancho, t=2mm, con un detalle
+    #     de labio/reborde de 40x20mm que se idealiza aquí como una sección
+    #     caja cerrada equivalente (aproximación — el perfil real del plano
+    #     parece un canal/caja con reborde de rigidización, no una caja
+    #     simple; verificar con la ficha de propiedades del fabricante antes
+    #     de un diseño definitivo).
+    riostra_25x40x10x15 = lipped_channel_upright(
+        "RIOSTRA 25x40x10x1.5mm", depth=0.040, flange=0.025, lip=0.010,
+        thickness=0.0015, material=a36, kind=SectionKind.BRACE_ANGLE,
+    )
+    viga_130x60x2 = box_beam_section(
+        "VIGA 130x60x2.0mm", depth=0.130, width=0.060,
+        thickness=0.0020, material=a36,
+    )
+
     return {
         s.name: s for s in [
             paral_122x25, paral_120x25, paral_90x20,
             viga_caja_100x50x20, viga_caja_120x50x20, viga_caja_160x60x15,
-            diagonal_tubular_30x30x2,
+            viga_130x60x2,
+            diagonal_tubular_30x30x2, riostra_25x40x10x15,
         ]
     }

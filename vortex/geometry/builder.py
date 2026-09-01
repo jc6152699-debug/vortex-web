@@ -6,6 +6,7 @@ plano Y-Z formando "marcos").
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -40,14 +41,74 @@ class RackParameters:
     base_fixity: str = "pinned"    # "pinned" | "fixed"
     include_struts_all_levels: bool = True
     n_frames: Optional[int] = None  # por defecto n_bays + 1
+    # Cuántos tramos de nivel abarca cada panel en zigzag de la diagonal de
+    # arriostramiento del marco (1 = una diagonal por nivel, como antes; 2 =
+    # una diagonal cada dos niveles, etc.). Ver `brace_levels_per_panel_for_angle`
+    # y `brace_levels_per_panel_for_count` para derivarlo de un ángulo
+    # objetivo o de una cantidad de diagonales deseada.
+    brace_levels_per_panel: int = 1
 
     def __post_init__(self) -> None:
         if self.n_frames is None:
             self.n_frames = self.n_bays + 1
+        self.brace_levels_per_panel = max(1, int(self.brace_levels_per_panel))
 
     @property
     def n_levels(self) -> int:
         return len(self.level_heights)
+
+
+def brace_levels_per_panel_for_angle(
+    angle_deg: float, frame_depth: float, level_heights: List[float],
+) -> int:
+    """
+    Número de tramos de nivel por panel de diagonal que mejor aproxima un
+    ángulo objetivo (medido desde la horizontal) para la diagonal de
+    arriostramiento del marco, dada la profundidad del marco y las alturas
+    de nivel disponibles. El ángulo real resultante puede consultarse con
+    `resulting_brace_angle_deg` una vez fijado el número de tramos (los
+    tramos de nivel no siempre son uniformes, así que el ángulo real varía
+    ligeramente panel a panel).
+    """
+    angle_deg = min(max(angle_deg, 1.0), 89.0)
+    avg_h = sum(level_heights) / len(level_heights) if level_heights else 1.0
+    target_vertical_span = frame_depth / math.tan(math.radians(angle_deg))
+    n = round(target_vertical_span / avg_h) if avg_h > 0 else 1
+    return max(1, min(int(n), len(level_heights)))
+
+
+def brace_levels_per_panel_for_count(panel_count: int, n_levels: int) -> int:
+    """Tramos de nivel por panel que producen aproximadamente `panel_count`
+    diagonales en total, dado el número de niveles de carga."""
+    panel_count = max(1, int(panel_count))
+    return max(1, round(n_levels / panel_count))
+
+
+def resulting_brace_angle_deg(
+    frame_depth: float, level_heights: List[float], levels_per_panel: int,
+) -> float:
+    """Ángulo real promedio (grados, desde la horizontal) de la diagonal de
+    arriostramiento resultante para un `levels_per_panel` dado."""
+    levels_per_panel = max(1, min(int(levels_per_panel), len(level_heights)))
+    avg_h = sum(level_heights) / len(level_heights) if level_heights else 1.0
+    vertical_span = avg_h * levels_per_panel
+    if vertical_span <= 0:
+        return 90.0
+    return math.degrees(math.atan(frame_depth / vertical_span))
+
+
+def brace_panel_count(n_levels: int, levels_per_panel: int) -> int:
+    """Número de paneles de diagonal resultantes (para mostrar en la GUI)."""
+    levels_per_panel = max(1, min(int(levels_per_panel), n_levels))
+    return math.ceil(n_levels / levels_per_panel)
+
+
+def _brace_panel_boundaries(n_levels: int, levels_per_panel: int) -> List[int]:
+    levels_per_panel = max(1, min(levels_per_panel, n_levels))
+    boundaries = list(range(0, n_levels, levels_per_panel))
+    if boundaries[-1] != n_levels:
+        boundaries.append(n_levels)
+    return boundaries
 
 
 def build_selective_rack(p: RackParameters) -> RackModel:
@@ -165,10 +226,12 @@ def build_selective_rack(p: RackParameters) -> RackModel:
             model.add_member(m)
             mid += 1
 
-        for lv in range(p.n_levels):
-            start_front = (lv % 2 == 0)
-            ni = node_id_of[(f, "frente" if start_front else "fondo", lv)]
-            nj = node_id_of[(f, "fondo" if start_front else "frente", lv + 1)]
+        boundaries = _brace_panel_boundaries(p.n_levels, p.brace_levels_per_panel)
+        for panel_i in range(len(boundaries) - 1):
+            lv0, lv1 = boundaries[panel_i], boundaries[panel_i + 1]
+            start_front = (panel_i % 2 == 0)
+            ni = node_id_of[(f, "frente" if start_front else "fondo", lv0)]
+            nj = node_id_of[(f, "fondo" if start_front else "frente", lv1)]
             m = Member(
                 id=mid, node_i=ni, node_j=nj,
                 section=p.brace_section, kind=MemberKind.BRACE,
@@ -177,8 +240,8 @@ def build_selective_rack(p: RackParameters) -> RackModel:
                 release_i_Mz=ConnectionRelease.pinned(),
                 release_j_My=ConnectionRelease.pinned(),
                 release_j_Mz=ConnectionRelease.pinned(),
-                label=f"DIAGONAL M{f} N{lv}-N{lv+1}",
-                frame_index=f, level_index=lv,
+                label=f"DIAGONAL M{f} N{lv0}-N{lv1}",
+                frame_index=f, level_index=lv0,
             )
             model.add_member(m)
             mid += 1

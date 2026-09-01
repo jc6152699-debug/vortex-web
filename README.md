@@ -18,6 +18,13 @@ el mismo formato que usan los calculistas de estanterías en Colombia.
 
 - **Geometría**: modelador paramétrico de estanterías selectivas
   (parales, vigas, diagonales de arriostramiento, placas base), en 3D.
+  Catálogo con secciones reales de fabricación (viga y riostra tomadas de
+  un plano de Autodesk Inventor) además de secciones de referencia
+  idealizadas. El arriostramiento del marco es configurable por ángulo
+  objetivo (30°–75°, incluido 70°) o por cantidad de diagonales — el
+  software deriva cuántos niveles abarca cada panel y reporta el ángulo
+  real logrado (que puede diferir del objetivo si la geometría no lo
+  permite sin subdividir el paral).
 - **Cargas**: muerta (peso propio), viva, de producto (PL), impacto,
   sísmica (NTC 5689 numeral 2.7 — con tablas Ca/Cv, Aa/Av por ciudad
   (NSR-10), R=4/6 según dirección), viento.
@@ -34,6 +41,11 @@ el mismo formato que usan los calculistas de estanterías en Colombia.
 - **Reporte**: memoria de cálculo `.docx` con portada, evaluación de
   cargas, combinaciones, sistema estructural, datos de entrada y
   verificación de elementos.
+- **Visualización**: el visor 3D colorea cada elemento por relación
+  demanda/capacidad (verde/amarillo/rojo) o por concentración de
+  esfuerzos (fuerza axial en parales, momento en vigas, normalizada por
+  tipo de elemento), con una leyenda de escala de colores junto al
+  visor.
 
 El motor de sismo fue **validado numéricamente contra una hoja de cálculo
 real de un proyecto de estantería** (ver `tests/test_seismic.py`), y el

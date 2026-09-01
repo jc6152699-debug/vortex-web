@@ -16,7 +16,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from vortex.geometry import RackParameters, build_selective_rack
+from vortex.geometry import (
+    RackParameters, build_selective_rack,
+    brace_levels_per_panel_for_angle, resulting_brace_angle_deg, brace_panel_count,
+)
 from vortex.geometry.model import MemberKind
 from vortex.sections import default_catalog
 from vortex.loads import seismic as sm
@@ -32,16 +35,36 @@ from vortex.units import kgf_to_kn
 def main() -> None:
     catalog = default_catalog()
     upright = catalog["PARAL 122x2.5mm"]
-    beam = catalog["VIGA CAJA 160x60x1.5mm"]  # sección real del proyecto de referencia
-    brace = catalog["DIAGONAL TUBULAR 30x30x2.0mm"]
+    # Secciones reales de fabricación (plano RIOSTRA_Y_VIGA.pdf, LOGIBOT,
+    # "RACK RODILLERA 2 NIVELES - SENCILLO", lámina 1/5, Autodesk Inventor).
+    beam = catalog["VIGA 130x60x2.0mm"]
+    brace = catalog["RIOSTRA 25x40x10x1.5mm"]
 
     n_bays = 4
+    frame_depth = 1.06
     level_heights = [1.20, 1.80, 1.80, 1.80, 1.80, 1.80]
+
+    # Arriostramiento configurable por ángulo objetivo (incluye 70°, como
+    # en el plano de fabricación): el número de niveles por panel de
+    # diagonal se deriva geométricamente de la profundidad de marco y la
+    # altura de nivel disponibles.
+    target_angle_deg = 70.0
+    brace_levels_per_panel = brace_levels_per_panel_for_angle(
+        target_angle_deg, frame_depth, level_heights,
+    )
+    real_angle = resulting_brace_angle_deg(frame_depth, level_heights, brace_levels_per_panel)
+    n_panels = brace_panel_count(len(level_heights), brace_levels_per_panel)
+    print(
+        f"Arriostramiento: ángulo objetivo {target_angle_deg:.0f}° -> "
+        f"{brace_levels_per_panel} nivel(es)/panel, {n_panels} diagonal(es)/marco, "
+        f"ángulo real {real_angle:.0f}°"
+    )
+
     params = RackParameters(
-        n_bays=n_bays, bay_length=2.44, frame_depth=1.06,
+        n_bays=n_bays, bay_length=2.44, frame_depth=frame_depth,
         level_heights=level_heights,
         upright_section=upright, beam_section=beam, brace_section=brace,
-        base_fixity="pinned",
+        base_fixity="pinned", brace_levels_per_panel=brace_levels_per_panel,
     )
     model = build_selective_rack(params)
     print(f"Modelo: {len(model.nodes)} nudos, {len(model.members)} elementos "

@@ -14,16 +14,22 @@ from typing import Optional
 
 from PySide6 import QtCore, QtWidgets
 
-from ..geometry import RackParameters, build_selective_rack
-from ..geometry.model import RackModel
+from ..geometry import (
+    RackParameters, build_selective_rack,
+    brace_levels_per_panel_for_angle, brace_levels_per_panel_for_count,
+    resulting_brace_angle_deg, brace_panel_count,
+)
+from ..geometry.model import RackModel, SectionKind
 from ..sections.catalog import default_catalog
 from ..loads.seismic import AA_AV_BY_CITY
 from ..analysis import PipelineInputs, PipelineResult, SeismicInputs, run_full_check
 from ..report import ProjectInfo, ReportData, generate_memoria
 from ..units import kgf_to_kn
 from .viewer3d import Viewer3D
+from .legend import ColorLegend
 
 SOIL_TYPES = ["A", "B", "C", "D", "E"]
+BRACE_ANGLES_DEG = [30, 45, 60, 65, 70, 75]
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -48,8 +54,27 @@ class MainWindow(QtWidgets.QMainWindow):
         main_layout.addWidget(self.form_panel, 0)
 
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+
+        viewer_container = QtWidgets.QWidget()
+        viewer_layout = QtWidgets.QVBoxLayout(viewer_container)
+        viewer_layout.setContentsMargins(0, 0, 0, 0)
         self.viewer = Viewer3D()
-        right.addWidget(self.viewer)
+        viewer_layout.addWidget(self.viewer, 1)
+
+        legend_row = QtWidgets.QHBoxLayout()
+        self.cb_color_by = QtWidgets.QComboBox()
+        self.cb_color_by.addItems([
+            "Colorear por: ratio de utilización",
+            "Colorear por: concentración de esfuerzos (fuerza relativa)",
+        ])
+        self.cb_color_by.currentIndexChanged.connect(self._on_color_by_changed)
+        self.cb_color_by.setEnabled(False)
+        legend_row.addWidget(self.cb_color_by)
+        self.legend = ColorLegend()
+        legend_row.addWidget(self.legend, 1)
+        viewer_layout.addLayout(legend_row)
+
+        right.addWidget(viewer_container)
 
         self.results_table = QtWidgets.QTableWidget(0, 5)
         self.results_table.setHorizontalHeaderLabels(
@@ -92,6 +117,8 @@ class MainWindow(QtWidgets.QMainWindow):
         geo_form.addRow("Altura entre niveles", self.sp_h_rest)
         geo_form.addRow("Base", self.cb_base)
         layout.addWidget(geo_box)
+        for sp in (self.sp_depth, self.sp_n_levels, self.sp_h_first, self.sp_h_rest):
+            sp.valueChanged.connect(self._update_brace_preview)
 
         sec_box = QtWidgets.QGroupBox("Secciones")
         sec_form = QtWidgets.QFormLayout(sec_box)
@@ -99,16 +126,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_beam = QtWidgets.QComboBox()
         self.cb_brace = QtWidgets.QComboBox()
         for name, sec in self.catalog.items():
-            if "PARAL" in name:
+            if sec.kind in (SectionKind.CFS_UPRIGHT, SectionKind.HR_UPRIGHT):
                 self.cb_upright.addItem(name)
-            elif "VIGA" in name:
+            elif sec.kind == SectionKind.BEAM_BOX:
                 self.cb_beam.addItem(name)
-            elif "DIAGONAL" in name:
+            elif sec.kind == SectionKind.BRACE_ANGLE:
                 self.cb_brace.addItem(name)
         sec_form.addRow("Paral", self.cb_upright)
         sec_form.addRow("Viga", self.cb_beam)
         sec_form.addRow("Diagonal", self.cb_brace)
         layout.addWidget(sec_box)
+
+        brace_box = QtWidgets.QGroupBox("Arriostramiento del marco (riostras)")
+        brace_form = QtWidgets.QFormLayout(brace_box)
+        self.cb_brace_angle = QtWidgets.QComboBox()
+        self.cb_brace_angle.addItem("Automático (según cantidad)", None)
+        for a in BRACE_ANGLES_DEG:
+            self.cb_brace_angle.addItem(f"{a}°", float(a))
+        self.cb_brace_angle.setCurrentIndex(BRACE_ANGLES_DEG.index(70) + 1)  # 70° por defecto
+        self.sp_brace_count = QtWidgets.QSpinBox()
+        self.sp_brace_count.setRange(1, 200)
+        self.lbl_brace_info = QtWidgets.QLabel("—")
+        self.lbl_brace_info.setStyleSheet("color: #555; font-size: 10px;")
+        self.lbl_brace_info.setWordWrap(True)
+        brace_form.addRow("Ángulo objetivo", self.cb_brace_angle)
+        brace_form.addRow("Cantidad de diagonales", self.sp_brace_count)
+        brace_form.addRow(self.lbl_brace_info)
+        layout.addWidget(brace_box)
+
+        self._brace_source = "angle"  # "angle" | "count" — cuál control mandó por última vez
+        self.cb_brace_angle.currentIndexChanged.connect(self._on_brace_angle_changed)
+        self.sp_brace_count.valueChanged.connect(self._on_brace_count_changed)
 
         load_box = QtWidgets.QGroupBox("Cargas")
         load_form = QtWidgets.QFormLayout(load_box)
@@ -156,6 +204,7 @@ class MainWindow(QtWidgets.QMainWindow):
         disclaimer.setStyleSheet("color: #888; font-size: 10px;")
         layout.addWidget(disclaimer)
 
+        self._update_brace_preview()
         return panel
 
     def _on_city_changed(self, city: str) -> None:
@@ -164,10 +213,54 @@ class MainWindow(QtWidgets.QMainWindow):
             self.sp_aa.setValue(float(data["Aa"]))
             self.sp_av.setValue(float(data["Av"]))
 
+    def _current_level_heights(self) -> list:
+        n_levels = self.sp_n_levels.value()
+        return [self.sp_h_first.value()] + [self.sp_h_rest.value()] * (n_levels - 1)
+
+    def _on_brace_angle_changed(self) -> None:
+        self._brace_source = "angle"
+        self._update_brace_preview()
+
+    def _on_brace_count_changed(self) -> None:
+        self._brace_source = "count"
+        self._update_brace_preview()
+
+    def _brace_levels_per_panel(self) -> int:
+        heights = self._current_level_heights()
+        depth = self.sp_depth.value()
+        angle = self.cb_brace_angle.currentData()
+        if self._brace_source == "angle" and angle is not None:
+            return brace_levels_per_panel_for_angle(angle, depth, heights)
+        return brace_levels_per_panel_for_count(self.sp_brace_count.value(), len(heights))
+
+    def _update_brace_preview(self) -> None:
+        heights = self._current_level_heights()
+        depth = self.sp_depth.value()
+        lpp = self._brace_levels_per_panel()
+        n_panels = brace_panel_count(len(heights), lpp)
+        real_angle = resulting_brace_angle_deg(depth, heights, lpp)
+
+        self.sp_brace_count.blockSignals(True)
+        self.sp_brace_count.setMaximum(max(1, len(heights)))
+        self.sp_brace_count.setValue(n_panels)
+        self.sp_brace_count.blockSignals(False)
+
+        text = (
+            f"{n_panels} diagonal(es) por marco · {lpp} nivel(es) por panel · "
+            f"ángulo real ≈ {real_angle:.0f}°"
+        )
+        target_angle = self.cb_brace_angle.currentData()
+        if self._brace_source == "angle" and target_angle is not None and abs(real_angle - target_angle) > 10:
+            text += (
+                f"\n⚠ el ángulo objetivo ({target_angle:.0f}°) no es alcanzable con la "
+                f"altura de nivel actual sin subdividir el paral (no soportado); se "
+                f"usa el panel más cercano posible."
+            )
+        self.lbl_brace_info.setText(text)
+
     # ------------------------------------------------------------------
     def _current_params(self) -> RackParameters:
-        n_levels = self.sp_n_levels.value()
-        heights = [self.sp_h_first.value()] + [self.sp_h_rest.value()] * (n_levels - 1)
+        heights = self._current_level_heights()
         return RackParameters(
             n_bays=self.sp_bays.value(),
             bay_length=self.sp_bay_length.value(),
@@ -177,13 +270,16 @@ class MainWindow(QtWidgets.QMainWindow):
             beam_section=self.catalog[self.cb_beam.currentText()],
             brace_section=self.catalog[self.cb_brace.currentText()],
             base_fixity=self.cb_base.currentText(),
+            brace_levels_per_panel=self._brace_levels_per_panel(),
         )
 
     def on_build_model(self) -> None:
         try:
             params = self._current_params()
             self.model = build_selective_rack(params)
+            self.pipeline_result = None
             self.viewer.show_model(self.model)
+            self.cb_color_by.setEnabled(False)
             self.results_table.setRowCount(0)
             self.status.showMessage(
                 f"Modelo construido: {len(self.model.nodes)} nudos, "
@@ -209,8 +305,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.pipeline_result = run_full_check(self.model, inputs)
             QtWidgets.QApplication.restoreOverrideCursor()
 
-            ratios = {mid: row.ratio for mid, row in self.pipeline_result.member_rows.items()}
-            self.viewer.color_by_ratio(ratios)
+            self.cb_color_by.setEnabled(True)
+            self._apply_coloring()
             self._populate_results_table()
             n_fail = sum(1 for r in self.pipeline_result.member_rows.values() if r.ratio > 1.0)
             self.status.showMessage(
@@ -220,6 +316,22 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             QtWidgets.QApplication.restoreOverrideCursor()
             self._show_error("Error durante el análisis", exc)
+
+    def _on_color_by_changed(self) -> None:
+        if self.pipeline_result is not None:
+            self._apply_coloring()
+
+    def _apply_coloring(self) -> None:
+        if self.pipeline_result is None:
+            return
+        if self.cb_color_by.currentIndex() == 1:
+            forces = {mid: row.raw_force for mid, row in self.pipeline_result.member_rows.items()}
+            self.viewer.color_by_heat(forces)
+            self.legend.set_heat_scale("parales: P (kN) · vigas: M (kN·m)")
+        else:
+            ratios = {mid: row.ratio for mid, row in self.pipeline_result.member_rows.items()}
+            self.viewer.color_by_ratio(ratios)
+            self.legend.set_ratio_scale()
 
     def _populate_results_table(self) -> None:
         rows = sorted(self.pipeline_result.member_rows.values(), key=lambda r: -r.ratio)

@@ -50,6 +50,7 @@ class MemberResultRow:
     combo: str
     ratio: float
     detail: str
+    raw_force: float = 0.0   # kN (parales, P) o kN*m (vigas, Mmax) — demanda gobernante
 
 
 @dataclass
@@ -137,7 +138,7 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
     w_pl_beam = (inputs.pl_per_level_kn / 2.0) / model.bay_length
 
     for member in model.members_of_kind(MemberKind.UPRIGHT):
-        best_ratio, best_combo, best_detail = -1.0, "", ""
+        best_ratio, best_combo, best_detail, best_p = -1.0, "", "", 0.0
         for combo, el_pattern in ((combo_gravity, None), (combo_seismic, "EL_X"), (combo_seismic, "EL_Y")):
             f_dl = combo.factors.get(LoadCase.DL, 0.0)
             f_pl = combo.factors.get(LoadCase.PL, 0.0)
@@ -164,14 +165,14 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
                 V2=abs(V2), V3=abs(V3), KLy=KLy, KLz=KLz,
             )
             if r.ratio > best_ratio:
-                best_ratio, best_combo = r.ratio, combo.label()
+                best_ratio, best_combo, best_p = r.ratio, combo.label(), abs(P)
                 best_detail = (
                     f"P={abs(P):.1f}/{r.Pa:.1f}kN, M2={abs(M2):.2f}/{r.Ma2:.2f}, "
                     f"M3={abs(M3):.2f}/{r.Ma3:.2f}kN·m, V={max(abs(V2),abs(V3)):.1f}/{r.Va:.1f}kN"
                 )
         result.member_rows[member.id] = MemberResultRow(
             member_id=member.id, label=member.label, kind="Paral",
-            combo=best_combo, ratio=best_ratio, detail=best_detail,
+            combo=best_combo, ratio=best_ratio, detail=best_detail, raw_force=best_p,
         )
 
     for member in model.members_of_kind(MemberKind.BEAM):
@@ -199,6 +200,7 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
             member_id=member.id, label=member.label, kind="Viga",
             combo=combo_gravity.label(), ratio=r.ratio,
             detail=f"M={r.Mmax:.2f}kN·m, δ={r.deflection_max * 1000:.1f}mm (lim L/{180:.0f})",
+            raw_force=r.Mmax,
         )
 
     return result
