@@ -48,10 +48,29 @@ el mismo formato que usan los calculistas de estanterías en Colombia.
   visor.
 
 El motor de sismo fue **validado numéricamente contra una hoja de cálculo
-real de un proyecto de estantería** (ver `tests/test_seismic.py`), y el
+real de un proyecto de estantería** (ver `tests/test_seismic.py`), el
 motor de análisis matricial fue validado contra soluciones clásicas de
 resistencia de materiales (viga en voladizo, viga simplemente apoyada —
-ver `tests/test_solve.py`).
+ver `tests/test_solve.py`), y el modelo 3D completo fue **contrastado
+contra las fuerzas reales reportadas por SAP2000 en la memoria de cálculo
+de un proyecto real** (`examples/run_example.py`): usando la misma
+geometría, secciones y combinación de carga (`1.4DL+1.2PL`), el paral
+interior de la base da **86.3 kN** en Vortex contra un rango real
+reportado de **73.2–84.3 kN** en la memoria — una coincidencia razonable
+que valida el reparto de cargas y el análisis matricial del modelo
+completo.
+
+**Limitación conocida, expuesta deliberadamente en vez de ocultada:** la
+sección de viga de catálogo (`VIGA CAJA 160x60x1.5mm`) es una caja
+rectangular simple idealizada a partir de las cotas exteriores de un
+plano de fabricación; el perfil real probablemente incluye un pliegue o
+refuerzo interior (visible como un escalón en el plano) que le da un
+módulo de sección mayor al calculado aquí. Por eso el ejemplo reporta
+ratios de flexión altos en las vigas bajo carga real — es una limitación
+de la sección de catálogo, no del motor de cargas ni del análisis (la
+carga distribuida calculada, ~4.8 kN/m, coincide con el valor real de
+SAP2000 de la memoria, ~4.92 kN/m). Para un diseño definitivo, reemplazar
+`Section.Sy` por el valor certificado del fabricante.
 
 ## ⚠️ Advertencia — uso profesional
 

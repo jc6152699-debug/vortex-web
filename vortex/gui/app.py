@@ -177,10 +177,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sp_aa = QtWidgets.QDoubleSpinBox(); self.sp_aa.setRange(0, 0.6); self.sp_aa.setDecimals(3)
         self.sp_av = QtWidgets.QDoubleSpinBox(); self.sp_av.setRange(0, 0.6); self.sp_av.setDecimals(3)
         self.cb_soil = QtWidgets.QComboBox(); self.cb_soil.addItems(SOIL_TYPES); self.cb_soil.setCurrentText("D")
+        self.chk_el_relaxed = QtWidgets.QCheckBox("Factor EL=1.0 (relajación NTC 5689 num. 2.2)")
+        self.chk_el_relaxed.setChecked(True)
+        self.chk_el_relaxed.setToolTip(
+            "Desmarcar para usar EL=1.5 sin relajar (combinación literal "
+            "1.2DL+1.5EL+0.85PL), como en el proyecto de referencia."
+        )
         seis_form.addRow("Ciudad (NSR-10)", self.cb_city)
         seis_form.addRow("Aa", self.sp_aa)
         seis_form.addRow("Av", self.sp_av)
         seis_form.addRow("Tipo de perfil de suelo", self.cb_soil)
+        seis_form.addRow(self.chk_el_relaxed)
         layout.addWidget(seis_box)
         self._on_city_changed(self.cb_city.currentText())
 
@@ -300,6 +307,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     soil_type=self.cb_soil.currentText(),
                     aa=self.sp_aa.value(), av=self.sp_av.value(),
                 ),
+                apply_el_factor_10=self.chk_el_relaxed.isChecked(),
             )
             QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
             self.pipeline_result = run_full_check(self.model, inputs)

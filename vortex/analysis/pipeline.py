@@ -40,6 +40,14 @@ class PipelineInputs:
     seismic: SeismicInputs
     k_long: float = 1.7                # factor de longitud efectiva, dirección no arriostrada
     k_trans: float = 1.0                 # factor de longitud efectiva, dirección arriostrada
+    # Factor de carga EL en las combinaciones 5/6 de LRFD (numeral 2.2):
+    # True -> 1.0 (relajación permitida cuando el sismo se calculó según
+    # el numeral 2.7, ver loads.combinations); False -> 1.5 (valor base
+    # de la ecuación LRFD sin relajar, usado literalmente en el proyecto
+    # de referencia — ver examples/run_example.py). Ambos son válidos
+    # según la norma; esta opción permite reproducir la elección exacta
+    # de un proyecto existente.
+    apply_el_factor_10: bool = True
 
 
 @dataclass
@@ -126,7 +134,7 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
         "EL_Y": analyze(model, el_y_loads, []),
     }
 
-    combos = lrfd_combinations(apply_el_factor_10=True)
+    combos = lrfd_combinations(apply_el_factor_10=inputs.apply_el_factor_10)
     combo_gravity = next(c for c in combos if c.id == "2" and "granizo" in c.description)
     combo_seismic = next(c for c in combos if c.id == "5")
 
