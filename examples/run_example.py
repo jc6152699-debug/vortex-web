@@ -32,7 +32,7 @@ from vortex.units import kgf_to_kn
 def main() -> None:
     catalog = default_catalog()
     upright = catalog["PARAL 122x2.5mm"]
-    beam = catalog["VIGA CAJA 120x50x2.0mm"]
+    beam = catalog["VIGA CAJA 160x60x1.5mm"]  # sección real del proyecto de referencia
     brace = catalog["DIAGONAL TUBULAR 30x30x2.0mm"]
 
     n_bays = 4

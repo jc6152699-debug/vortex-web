@@ -4,8 +4,10 @@ Software de escritorio en Python para **modelar, analizar y verificar
 estanterías industriales de acero (racks porta-estibas)** conforme a la
 norma **NTC 5689:2009** ("Especificación para el diseño, ensayo y
 utilización de estanterías industriales de acero", adopción modificada de
-ANSI/RMI MH16.1), con apoyo de AISI (perfiles formados en frío) y AISC
-(perfiles laminados en caliente).
+ANSI/RMI MH16.1), con las fórmulas de diseño de elementos tomadas
+literalmente de **NSR-10, Título F, Capítulo F.4** ("Estructuras de acero
+con perfiles de lámina formada en frío", la adopción colombiana de AISI
+S100 a la que remite la propia NTC 5689 numeral 1.4).
 
 La interfaz combina un modelador paramétrico 3D (estilo Autodesk Inventor)
 con un motor de análisis matricial de pórtico espacial y verificación de
@@ -23,9 +25,12 @@ el mismo formato que usan los calculistas de estanterías en Colombia.
 - **Análisis**: elementos finitos de pórtico espacial 3D (6 GDL/nudo,
   método de la rigidez directa), con conexiones viga-paral semirrígidas
   (condensación estática) y diagonales articuladas.
-- **Verificación**: parales (compresión + flexión biaxial, AISI/AISC),
-  vigas (flexión, cortante, deflexión de servicio), placas base y
-  anclajes (demanda), diagonales.
+- **Verificación**: parales (compresión + flexión biaxial + cortante,
+  con ancho efectivo real por elemento — NSR-10 F.4.2.2/F.4.3.4, no una
+  aproximación plana — y chequeo por componente P/M2/M3/V2/V3 además del
+  ratio de interacción combinado), vigas (flexión, cortante — NSR-10
+  F.4.3.3-44 —, deflexión de servicio), placas base y anclajes (demanda),
+  diagonales.
 - **Reporte**: memoria de cálculo `.docx` con portada, evaluación de
   cargas, combinaciones, sistema estructural, datos de entrada y
   verificación de elementos.

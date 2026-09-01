@@ -6,12 +6,18 @@ servicio (NTC 5689, con Imp aplicado sólo a flexión/cortante — numeral
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Tuple, TYPE_CHECKING
 
 import numpy as np
 
-from ..analysis.solve import MemberForces
 from ..geometry.model import Section
+from .upright_cfs import shear_capacity
+
+if TYPE_CHECKING:
+    # Importado sólo para chequeo de tipos: evita un import circular en
+    # tiempo de ejecución con vortex.analysis (que a su vez depende de
+    # vortex.design.beam a través de analysis.pipeline).
+    from ..analysis.solve import MemberForces
 
 OMEGA_B = 1.67
 DEFLECTION_LIMIT_RATIO = 180.0   # L/180, criterio usual de estantería (RMI/NTC 5689 Anexo B)
@@ -68,11 +74,11 @@ class BeamCheckResult:
     combo_id: str
     Mmax: float
     x_Mmax: float
-    Vmax: float
-    fb: float
+    Vmax: float               # kN, cortante máximo de diseño
+    fb: float                   # kPa, esfuerzo de flexión actuante (Mmax/Sy)
     Fb_allow: float
-    fv: float
-    Fv_allow: float
+    fv: float                     # kN, alias de Vmax (cortante actuante)
+    Fv_allow: float                 # kN, Va — capacidad admisible a cortante del alma
     ratio_bending: float
     ratio_shear: float
     deflection_max: float = 0.0
@@ -95,14 +101,9 @@ def check_beam(
     mf: MemberForces,
     w_local_z: float,
     L: float,
-    shear_area_factor: float = 0.5,
 ) -> BeamCheckResult:
-    """
-    `shear_area_factor` aproxima el área efectiva a cortante como una
-    fracción del área bruta (0.5 es una aproximación conservadora usual
-    para perfiles tipo caja/canal cuando no se dispone del área de alma
-    exacta del fabricante).
-    """
+    """Verifica flexión (NSR-10 F.4.3.3-1, Ωb=1.67) y cortante (NSR-10
+    F.4.3.3-44, Ωv=1.60, ver `design.upright_cfs.shear_capacity`)."""
     Fy = section.Fy
     x_max, Mmax = moment_envelope(mf, w_local_z, L)
     Vmax = max(abs(mf.V3_i), abs(mf.V3_j))
@@ -110,22 +111,22 @@ def check_beam(
     Fb_allow = Fy / OMEGA_B
     fb = Mmax / section.Sy if section.Sy > 0 else float("inf")
 
-    Aw = section.A * shear_area_factor
-    Fv_allow = 0.4 * Fy
-    fv = Vmax / Aw if Aw > 0 else float("inf")
+    Va = shear_capacity(section, Fy)
 
     notes = []
     if section.Ae_known is None:
         notes.append(
             "Módulo de sección (Sy) calculado con área bruta geométrica "
-            "idealizada; verificar con la ficha certificada del fabricante."
+            "idealizada (sin reducción por ancho efectivo bajo gradiente "
+            "de esfuerzo, NSR-10 F.4.3.3.1.1); verificar con la ficha "
+            "certificada del fabricante."
         )
 
     return BeamCheckResult(
         combo_id=combo_id, Mmax=Mmax, x_Mmax=x_max, Vmax=Vmax,
-        fb=fb, Fb_allow=Fb_allow, fv=fv, Fv_allow=Fv_allow,
+        fb=fb, Fb_allow=Fb_allow, fv=Vmax, Fv_allow=Va,
         ratio_bending=fb / Fb_allow if Fb_allow > 0 else float("inf"),
-        ratio_shear=fv / Fv_allow if Fv_allow > 0 else float("inf"),
+        ratio_shear=Vmax / Va if Va > 0 else float("inf"),
         notes=notes,
     )
 

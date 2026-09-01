@@ -147,20 +147,28 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
             P = f_dl * mf_dl.P_i + f_pl * mf_pl.P_i
             M2 = f_dl * mf_dl.M2_i + f_pl * mf_pl.M2_i
             M3 = f_dl * mf_dl.M3_i + f_pl * mf_pl.M3_i
+            V2 = f_dl * mf_dl.V2_i + f_pl * mf_pl.V2_i
+            V3 = f_dl * mf_dl.V3_i + f_pl * mf_pl.V3_i
             if el_pattern is not None:
                 mf_el = patterns[el_pattern].member_forces[member.id]
                 P += f_el * mf_el.P_i
                 M2 += f_el * mf_el.M2_i
                 M3 += f_el * mf_el.M3_i
+                V2 += f_el * mf_el.V2_i
+                V3 += f_el * mf_el.V3_i
             L = model.member_length(member)
             KLy = inputs.k_long * L
             KLz = inputs.k_trans * L
             r = check_upright_compression_bending(
-                member.section, combo.id, P=abs(P), M2=abs(M2), M3=abs(M3), KLy=KLy, KLz=KLz,
+                member.section, combo.id, P=abs(P), M2=abs(M2), M3=abs(M3),
+                V2=abs(V2), V3=abs(V3), KLy=KLy, KLz=KLz,
             )
             if r.ratio > best_ratio:
                 best_ratio, best_combo = r.ratio, combo.label()
-                best_detail = f"P={abs(P):.1f}kN, M2={abs(M2):.2f}, M3={abs(M3):.2f} kN·m"
+                best_detail = (
+                    f"P={abs(P):.1f}/{r.Pa:.1f}kN, M2={abs(M2):.2f}/{r.Ma2:.2f}, "
+                    f"M3={abs(M3):.2f}/{r.Ma3:.2f}kN·m, V={max(abs(V2),abs(V3)):.1f}/{r.Va:.1f}kN"
+                )
         result.member_rows[member.id] = MemberResultRow(
             member_id=member.id, label=member.label, kind="Paral",
             combo=best_combo, ratio=best_ratio, detail=best_detail,

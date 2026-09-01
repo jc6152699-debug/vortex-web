@@ -26,6 +26,7 @@ resultado numérico no confiable.
 """
 from __future__ import annotations
 
+import dataclasses
 from typing import List, Sequence, Tuple
 
 from ..geometry.model import Material, Section, SectionKind
@@ -144,7 +145,22 @@ def lipped_channel_upright(
         name, points, thickness, material,
         kind=SectionKind.CFS_UPRIGHT, perforation_ratio=perforation_ratio,
     )
-    return sec
+    # Segmentos planos para ancho efectivo (NSR-10 F.4.2.2): el alma es un
+    # elemento rigidizado por un ala en cada borde longitudinal (k=4,
+    # F.4.2.2-1 a -5); las alas y los labios se tratan conservadoramente
+    # como elementos NO rigidizados (k=0.43, F.4.2.3), ignorando el aporte
+    # rigidizador del labio — una simplificación del lado seguro (subestima
+    # el ancho efectivo real de un labio adecuado) que evita depender de la
+    # verificación completa de rigidizador de borde de la sección F.4.2.4.
+    K_STIFFENED, K_UNSTIFFENED = 4.0, 0.43
+    segments = [
+        {"w": lip, "t": thickness, "k": K_UNSTIFFENED, "is_web": False},   # labio inferior
+        {"w": flange, "t": thickness, "k": K_UNSTIFFENED, "is_web": False},  # ala inferior
+        {"w": depth, "t": thickness, "k": K_STIFFENED, "is_web": True},        # alma
+        {"w": flange, "t": thickness, "k": K_UNSTIFFENED, "is_web": False},  # ala superior
+        {"w": lip, "t": thickness, "k": K_UNSTIFFENED, "is_web": False},   # labio superior
+    ]
+    return dataclasses.replace(sec, effective_width_segments=segments)
 
 
 def rectangular_tube_section(
@@ -175,11 +191,21 @@ def rectangular_tube_section(
     Ap = h * b
     J = 2 * t * (h * b) ** 2 / (h + b)
     _ = Ap
+    # Las dos almas (paredes verticales) de la sección cajón son elementos
+    # rigidizados en ambos bordes (k=4, NSR-10 F.4.2.2); las dos alas
+    # (paredes horizontales) también, al ser una sección cerrada.
+    segments = [
+        {"w": H, "t": t, "k": 4.0, "is_web": True},
+        {"w": H, "t": t, "k": 4.0, "is_web": True},
+        {"w": B, "t": t, "k": 4.0, "is_web": False},
+        {"w": B, "t": t, "k": 4.0, "is_web": False},
+    ]
     return Section(
         name=name, kind=kind, material=material,
         A=A, Iy=Iy, Iz=Iz, J=J,
         depth=H, width=B, thickness=t,
         Sy=Sy, Sz=Sz, ry=ry, rz=rz,
+        effective_width_segments=segments,
     )
 
 
@@ -232,6 +258,13 @@ def default_catalog() -> dict:
         "VIGA CAJA 120x50x2.0mm", depth=0.120, width=0.050,
         thickness=0.0020, material=a36,
     )
+    # Sección real usada en el proyecto de referencia ("VIGA 160X60X1.5X244"
+    # en la tabla Frame Section Assignments de la memoria de cálculo anexa;
+    # 244 = longitud en cm, no es una propiedad de la sección).
+    viga_caja_160x60x15 = box_beam_section(
+        "VIGA CAJA 160x60x1.5mm", depth=0.160, width=0.060,
+        thickness=0.0015, material=a36,
+    )
     diagonal_tubular_30x30x2 = rectangular_tube_section(
         "DIAGONAL TUBULAR 30x30x2.0mm", depth=0.030, width=0.030,
         thickness=0.0020, material=a36, kind=SectionKind.BRACE_ANGLE,
@@ -240,7 +273,7 @@ def default_catalog() -> dict:
     return {
         s.name: s for s in [
             paral_122x25, paral_120x25, paral_90x20,
-            viga_caja_100x50x20, viga_caja_120x50x20,
+            viga_caja_100x50x20, viga_caja_120x50x20, viga_caja_160x60x15,
             diagonal_tubular_30x30x2,
         ]
     }

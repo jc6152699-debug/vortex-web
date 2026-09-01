@@ -90,6 +90,14 @@ class Section:
     ro: float = 0.0           # radio de giro polar respecto al centro de cortante, m
     Fy_override: Optional[float] = None  # Fy propio del perfil si difiere del material
 
+    # Segmentos planos de pared delgada (ancho w, espesor t, coeficiente de
+    # pandeo de placa k) para el cálculo del ancho efectivo Ae(f) según
+    # NSR-10 Título F.4.2.2 (k=4: elemento rigidizado por almas en ambos
+    # bordes, p.ej. el alma; k=0.43: elemento no rigidizado, p.ej. alas y
+    # labios — ver `design.upright_cfs.effective_area_at_stress`). Cada
+    # entrada: {"w": float, "t": float, "k": float, "is_web": bool}.
+    effective_width_segments: Optional[list] = None
+
     # Área neta efectiva para compresión a Fy (AISI, ancho efectivo) — si se
     # conoce de ensayo o cálculo previo se puede fijar directamente aquí;
     # en caso contrario `design.upright_cfs` la estima.
