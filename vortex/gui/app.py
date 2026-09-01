@@ -74,6 +74,30 @@ class MainWindow(QtWidgets.QMainWindow):
         legend_row.addWidget(self.legend, 1)
         viewer_layout.addLayout(legend_row)
 
+        diagram_row = QtWidgets.QHBoxLayout()
+        self.chk_show_diagram = QtWidgets.QCheckBox("Líneas de fuerzas")
+        self.chk_show_diagram.setEnabled(False)
+        self.chk_show_diagram.toggled.connect(self._on_diagram_changed)
+        diagram_row.addWidget(self.chk_show_diagram)
+        self.cb_diagram_pattern = QtWidgets.QComboBox()
+        self.cb_diagram_pattern.addItems(["DL", "PL", "EL_X", "EL_Y"])
+        self.cb_diagram_pattern.currentIndexChanged.connect(self._on_diagram_changed)
+        diagram_row.addWidget(self.cb_diagram_pattern)
+        self.cb_diagram_component = QtWidgets.QComboBox()
+        self.cb_diagram_component.addItems(["P", "M2", "M3", "V2", "V3"])
+        self.cb_diagram_component.setCurrentText("M2")
+        self.cb_diagram_component.currentIndexChanged.connect(self._on_diagram_changed)
+        diagram_row.addWidget(self.cb_diagram_component)
+        self.sp_diagram_scale = QtWidgets.QDoubleSpinBox()
+        self.sp_diagram_scale.setRange(0.1, 10.0)
+        self.sp_diagram_scale.setSingleStep(0.1)
+        self.sp_diagram_scale.setValue(1.0)
+        self.sp_diagram_scale.valueChanged.connect(self._on_diagram_changed)
+        diagram_row.addWidget(QtWidgets.QLabel("Escala"))
+        diagram_row.addWidget(self.sp_diagram_scale)
+        diagram_row.addStretch(1)
+        viewer_layout.addLayout(diagram_row)
+
         right.addWidget(viewer_container)
 
         self.results_table = QtWidgets.QTableWidget(0, 5)
@@ -287,6 +311,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.pipeline_result = None
             self.viewer.show_model(self.model)
             self.cb_color_by.setEnabled(False)
+            self.chk_show_diagram.setChecked(False)
+            self.chk_show_diagram.setEnabled(False)
             self.results_table.setRowCount(0)
             self.status.showMessage(
                 f"Modelo construido: {len(self.model.nodes)} nudos, "
@@ -314,7 +340,9 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QApplication.restoreOverrideCursor()
 
             self.cb_color_by.setEnabled(True)
+            self.chk_show_diagram.setEnabled(True)
             self._apply_coloring()
+            self._on_diagram_changed()
             self._populate_results_table()
             n_fail = sum(1 for r in self.pipeline_result.member_rows.values() if r.ratio > 1.0)
             self.status.showMessage(
@@ -328,6 +356,21 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_color_by_changed(self) -> None:
         if self.pipeline_result is not None:
             self._apply_coloring()
+
+    def _on_diagram_changed(self) -> None:
+        if self.pipeline_result is None:
+            return
+        if not self.chk_show_diagram.isChecked():
+            self.viewer.clear_force_diagram()
+            return
+        pattern = self.cb_diagram_pattern.currentText()
+        component = self.cb_diagram_component.currentText()
+        analysis = self.pipeline_result.patterns.get(pattern)
+        if analysis is None:
+            return
+        self.viewer.show_force_diagram(
+            self.model, analysis, component, scale=self.sp_diagram_scale.value(),
+        )
 
     def _apply_coloring(self) -> None:
         if self.pipeline_result is None:
@@ -395,6 +438,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 brace_section=self.catalog[self.cb_brace.currentText()],
                 method_name="LRFD", combos=self.pipeline_result.combos,
                 design_rows=design_rows,
+                member_rows_detail=list(self.pipeline_result.member_rows.values()),
             )
             generate_memoria(data, path)
             self.status.showMessage(f"Memoria de cálculo exportada: {path}")

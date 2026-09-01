@@ -59,6 +59,9 @@ class MemberResultRow:
     ratio: float
     detail: str
     raw_force: float = 0.0   # kN (parales, P) o kN*m (vigas, Mmax) — demanda gobernante
+    length_m: float = 0.0       # m, longitud del elemento (columna "H[m]" del anexo)
+    upright_check: Optional[UprightCheckResult] = None   # resultado completo (parales)
+    beam_check: Optional[BeamCheckResult] = None            # resultado completo (vigas)
 
 
 @dataclass
@@ -146,7 +149,7 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
     w_pl_beam = (inputs.pl_per_level_kn / 2.0) / model.bay_length
 
     for member in model.members_of_kind(MemberKind.UPRIGHT):
-        best_ratio, best_combo, best_detail, best_p = -1.0, "", "", 0.0
+        best_ratio, best_combo, best_detail, best_p, best_r = -1.0, "", "", 0.0, None
         for combo, el_pattern in ((combo_gravity, None), (combo_seismic, "EL_X"), (combo_seismic, "EL_Y")):
             f_dl = combo.factors.get(LoadCase.DL, 0.0)
             f_pl = combo.factors.get(LoadCase.PL, 0.0)
@@ -173,7 +176,7 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
                 V2=abs(V2), V3=abs(V3), KLy=KLy, KLz=KLz,
             )
             if r.ratio > best_ratio:
-                best_ratio, best_combo, best_p = r.ratio, combo.label(), abs(P)
+                best_ratio, best_combo, best_p, best_r = r.ratio, combo.label(), abs(P), r
                 best_detail = (
                     f"P={abs(P):.1f}/{r.Pa:.1f}kN, M2={abs(M2):.2f}/{r.Ma2:.2f}, "
                     f"M3={abs(M3):.2f}/{r.Ma3:.2f}kN·m, V={max(abs(V2),abs(V3)):.1f}/{r.Va:.1f}kN"
@@ -181,6 +184,7 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
         result.member_rows[member.id] = MemberResultRow(
             member_id=member.id, label=member.label, kind="Paral",
             combo=best_combo, ratio=best_ratio, detail=best_detail, raw_force=best_p,
+            length_m=model.member_length(member), upright_check=best_r,
         )
 
     for member in model.members_of_kind(MemberKind.BEAM):
@@ -208,7 +212,7 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
             member_id=member.id, label=member.label, kind="Viga",
             combo=combo_gravity.label(), ratio=r.ratio,
             detail=f"M={r.Mmax:.2f}kN·m, δ={r.deflection_max * 1000:.1f}mm (lim L/{180:.0f})",
-            raw_force=r.Mmax,
+            raw_force=r.Mmax, length_m=model.bay_length, beam_check=r,
         )
 
     return result

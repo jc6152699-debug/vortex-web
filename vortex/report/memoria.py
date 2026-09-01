@@ -49,6 +49,14 @@ class ReportData:
     method_name: str
     combos: List[Combination]
     design_rows: List[Dict[str, Any]] = field(default_factory=list)
+    # Filas completas de vortex.analysis.pipeline.MemberResultRow (opcional):
+    # si se suministran, se agregan las tablas "RESISTENCIA <sección> MODELO
+    # CFS" y "CHEQUEO" con el mismo formato de columnas (H, P, Mx, Vy, My,
+    # Vx) que usa el calculista de referencia en su memoria (ver
+    # `_add_resistencia_chequeo_tables`). Se accede por duck-typing
+    # (.kind, .length_m, .upright_check) para no acoplar `report` a
+    # `analysis`.
+    member_rows_detail: List[Any] = field(default_factory=list)
     disclaimer_extra: str = ""
 
 
@@ -339,6 +347,67 @@ def _add_results(doc: Document, data: ReportData) -> None:
         ).bold = True
 
 
+def _add_resistencia_chequeo_tables(doc: Document, data: ReportData) -> None:
+    """
+    Tablas "RESISTENCIA <sección> MODELO CFS" y "CHEQUEO", con el mismo
+    nombre, orden de columnas y convención de ejes (Mx=M3/V2=Vy en el
+    plano 1, My=M2/V3=Vx en el plano 2) que usa el calculista de
+    referencia en su memoria de cálculo — para que el formato sea
+    inmediatamente reconocible frente a memorias anteriores del mismo
+    proyecto, aunque los valores sean los que calcula Vortex.
+    """
+    rows = [r for r in data.member_rows_detail if getattr(r, "kind", "") == "Paral" and r.upright_check]
+    if not rows:
+        return
+
+    doc.add_heading(f"RESISTENCIA {data.upright_section.name} MODELO CFS", level=2)
+    doc.add_paragraph(
+        "Fuerzas de diseño en la combinación crítica de cada paral (ver "
+        "numeral 2), en la convención de ejes del anexo: Mx/Vy = momento/"
+        "cortante en el plano 1 (M3/V2 de Vortex), My/Vx = momento/"
+        "cortante en el plano 2 (M2/V3 de Vortex)."
+    )
+    t1 = doc.add_table(rows=1, cols=7)
+    t1.style = "Light Grid Accent 1"
+    for i, h in enumerate(["ITEM", "H [m]", "P [KN]", "Mx [KN-m]", "Vy [KN]", "My [KN-m]", "Vx [KN]"]):
+        t1.rows[0].cells[i].text = h
+    for item, row in enumerate(rows, start=1):
+        c = row.upright_check
+        cells = t1.add_row().cells
+        cells[0].text = str(item)
+        cells[1].text = f"{row.length_m:.2f}"
+        cells[2].text = f"{c.P:.3f}"
+        cells[3].text = f"{c.M3:.4f}"
+        cells[4].text = f"{c.V2:.3f}"
+        cells[5].text = f"{c.M2:.4f}"
+        cells[6].text = f"{c.V3:.3f}"
+
+    doc.add_heading("CHEQUEO", level=2)
+    t2 = doc.add_table(rows=1, cols=6)
+    t2.style = "Light Grid Accent 1"
+    for i, h in enumerate(["ITEM", "P [KN]", "Mx [KN-m]", "Vy [KN]", "My [KN-m]", "Vx [KN]"]):
+        t2.rows[0].cells[i].text = h
+    n_fail = 0
+    for item, row in enumerate(rows, start=1):
+        checks = row.upright_check.component_checks
+        vals = [checks["P"], checks["M3"], checks["V2"], checks["M2"], checks["V3"]]
+        if not all(vals):
+            n_fail += 1
+        cells = t2.add_row().cells
+        cells[0].text = str(item)
+        for i, ok in enumerate(vals, start=1):
+            cells[i].text = "OK" if ok else "NO CUMPLE"
+    doc.add_paragraph()
+    if n_fail:
+        p = doc.add_paragraph()
+        p.add_run(
+            f"{n_fail} de {len(rows)} parales tienen al menos un componente "
+            f"(P, Mx, Vy, My o Vx) que NO CUMPLE de forma individual."
+        ).bold = True
+    else:
+        doc.add_paragraph(f"Los {len(rows)} parales cumplen en todos sus componentes.")
+
+
 def _add_conclusions(doc: Document, data: ReportData) -> None:
     doc.add_heading("6. CONCLUSIONES", level=1)
     doc.add_paragraph(
@@ -376,6 +445,7 @@ def generate_memoria(data: ReportData, output_path: str) -> str:
     _add_structural_system(doc, data)
     _add_input_data(doc, data)
     _add_results(doc, data)
+    _add_resistencia_chequeo_tables(doc, data)
     _add_conclusions(doc, data)
 
     doc.save(output_path)

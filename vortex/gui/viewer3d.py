@@ -14,6 +14,10 @@ import pyqtgraph.opengl as gl
 from PySide6 import QtCore
 
 from ..geometry.model import MemberKind, RackModel
+from ..analysis.solve import AnalysisResult
+
+DIAGRAM_COLOR = (1.0, 0.55, 0.0, 1.0)   # naranja, estilo diagramas SAP2000
+FORCE_COMPONENTS = ["P", "M2", "M3", "V2", "V3"]
 
 KIND_COLOR = {
     MemberKind.UPRIGHT: (0.2, 0.4, 0.9, 1.0),
@@ -58,12 +62,14 @@ class Viewer3D(gl.GLViewWidget):
         self.addItem(self._grid)
         self._line_item: Optional[gl.GLLinePlotItem] = None
         self._member_items: Dict[int, gl.GLLinePlotItem] = {}
+        self._diagram_items: list = []
         self._model: Optional[RackModel] = None
 
     def clear_model(self) -> None:
         for item in self._member_items.values():
             self.removeItem(item)
         self._member_items.clear()
+        self.clear_force_diagram()
 
     def show_model(self, model: RackModel) -> None:
         self.clear_model()
@@ -110,6 +116,63 @@ class Viewer3D(gl.GLViewWidget):
                 item = self._member_items.get(mid)
                 if item is not None:
                     item.setData(color=heat_color(t))
+
+    def clear_force_diagram(self) -> None:
+        for item in self._diagram_items:
+            self.removeItem(item)
+        self._diagram_items.clear()
+
+    def show_force_diagram(
+        self, model: RackModel, analysis: AnalysisResult, component: str,
+        kinds: Optional[set] = None, scale: float = 1.0,
+    ) -> None:
+        """
+        Dibuja el diagrama de la fuerza `component` (P, M2, M3, V2 o V3)
+        de cada elemento como una línea offset (estilo SAP2000/Inventor),
+        perpendicular al eje del elemento, con el valor en cada extremo
+        interpolado linealmente entre los dos extremos analizados (para
+        vigas con carga uniforme, esta es una aproximación lineal del
+        verdadero diagrama parabólico de momento — el cálculo de diseño
+        usa la fórmula exacta por estación, ver `design.beam`; sólo la
+        visualización se simplifica aquí a una línea recta extremo-extremo).
+        """
+        self.clear_force_diagram()
+        if component not in FORCE_COMPONENTS:
+            raise ValueError(f"Componente de fuerza desconocido: {component}")
+
+        end_attr_i = {"P": "P_i", "M2": "M2_i", "M3": "M3_i", "V2": "V2_i", "V3": "V3_i"}[component]
+        end_attr_j = {"P": "P_j", "M2": "M2_j", "M3": "M3_j", "V2": "V2_j", "V3": "V3_j"}[component]
+
+        values = {}
+        for mid, mf in analysis.member_forces.items():
+            member = model.members.get(mid)
+            if member is None or (kinds is not None and member.kind not in kinds):
+                continue
+            values[mid] = (getattr(mf, end_attr_i), getattr(mf, end_attr_j))
+        if not values:
+            return
+        max_abs = max(max(abs(a), abs(b)) for a, b in values.values()) or 1.0
+
+        (x0, y0, z0), (x1, y1, z1) = model.bounding_box()
+        span = max(x1 - x0, y1 - y0, z1 - z0, 1.0)
+        max_offset = 0.12 * span * scale
+
+        offset_axis = "ez" if component in ("M2", "P", "V2") else "ey"
+        for mid, (vi, vj) in values.items():
+            member = model.members[mid]
+            geom = analysis.member_geometry.get(mid)
+            if geom is None:
+                continue
+            ni, nj = model.nodes[member.node_i], model.nodes[member.node_j]
+            p_i = np.array([ni.x, ni.y, ni.z])
+            p_j = np.array([nj.x, nj.y, nj.z])
+            axis_vec = getattr(geom, offset_axis)
+            off_i = p_i + axis_vec * (vi / max_abs) * max_offset
+            off_j = p_j + axis_vec * (vj / max_abs) * max_offset
+            pts = np.array([p_i, off_i, off_j, p_j])
+            item = gl.GLLinePlotItem(pos=pts, color=DIAGRAM_COLOR, width=2.0, antialias=True)
+            self.addItem(item)
+            self._diagram_items.append(item)
 
     def color_by_kind(self) -> None:
         if self._model is None:

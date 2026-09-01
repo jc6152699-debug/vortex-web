@@ -233,9 +233,25 @@ def check_upright_compression_bending(
     """
     P>0 = compresión. M2, M3 momentos máximos de diseño (valor absoluto)
     en el elemento para la combinación `combo_id`. KLy, KLz = longitudes
-    efectivas (K*L, ya con el factor de longitud efectiva incluido, p.ej.
-    K=1.7 en la dirección no arriostrada según NTC 5689 numeral 6.3.1.1
-    y la hoja de referencia del proyecto).
+    efectivas (K*L, ya con el factor de longitud efectiva incluido: K=1.7
+    en la dirección no arriostrada, K=1.0 en la arriostrada — NTC 5689
+    numeral 6.3.1.1, confirmado además por RMI MH16.1-2008 numeral 6.3.1
+    "Racks Not/Braced Against Sidesway" y por la hoja de referencia del
+    proyecto).
+
+    NOTA — chequeo pendiente (no implementado): RMI MH16.1-2008 numeral
+    6.3.4 "Stability of Trussed-Braced Upright Frames" exige además un
+    chequeo de pandeo GLOBAL del marco arriostrado completo (como
+    columna equivalente, con una rigidez EI reducida por la flexibilidad
+    a cortante de las diagonales/horizontales — fórmula Pcr con
+    parámetros A, Ab, Ad, Ic, φ, k según el patrón de arriostramiento).
+    No se implementa aquí porque la fórmula exacta (con su término de
+    corrección por cortante) no pudo extraerse de forma confiable del
+    documento fuente (ecuaciones en fuente Symbol/OMML mal conservadas en
+    la conversión de texto); implementarla con un término mal transcrito
+    sería peor que no implementarla. Para marcos altos y esbeltos,
+    verificar este numeral manualmente contra el texto oficial de RMI
+    MH16.1 antes de un diseño definitivo.
     """
     E, G, Fy = section.material.E, section.material.G, section.Fy
     notes = []

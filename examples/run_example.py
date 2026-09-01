@@ -152,6 +152,7 @@ def main() -> None:
         material_names=[upright.material.name, beam.material.name],
         upright_section=upright, beam_section=beam, brace_section=brace,
         method_name="LRFD", combos=result.combos, design_rows=design_rows,
+        member_rows_detail=list(result.member_rows.values()),
     )
     out_path = os.path.join(os.path.dirname(__file__), "memoria_ejemplo.docx")
     generate_memoria(report_data, out_path)

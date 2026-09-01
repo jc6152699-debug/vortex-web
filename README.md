@@ -39,13 +39,19 @@ el mismo formato que usan los calculistas de estanterías en Colombia.
   F.4.3.3-44 —, deflexión de servicio), placas base y anclajes (demanda),
   diagonales.
 - **Reporte**: memoria de cálculo `.docx` con portada, evaluación de
-  cargas, combinaciones, sistema estructural, datos de entrada y
-  verificación de elementos.
+  cargas, combinaciones, sistema estructural, datos de entrada,
+  verificación de elementos, y las tablas "RESISTENCIA \<sección\> MODELO
+  CFS" / "CHEQUEO" con el mismo nombre y columnas (H, P, Mx, Vy, My, Vx)
+  que usa el calculista de referencia, para que el formato sea
+  reconocible frente a memorias anteriores del mismo proyecto.
 - **Visualización**: el visor 3D colorea cada elemento por relación
   demanda/capacidad (verde/amarillo/rojo) o por concentración de
   esfuerzos (fuerza axial en parales, momento en vigas, normalizada por
   tipo de elemento), con una leyenda de escala de colores junto al
-  visor.
+  visor. También dibuja **líneas de fuerzas** (diagramas de P, M2, M3,
+  V2 o V3, estilo SAP2000, offset perpendicular al eje de cada
+  elemento) para cualquiera de los patrones de carga resueltos (DL, PL,
+  sismo en X, sismo en Y), con control de escala.
 
 El motor de sismo fue **validado numéricamente contra una hoja de cálculo
 real de un proyecto de estantería** (ver `tests/test_seismic.py`), el
@@ -71,6 +77,24 @@ de la sección de catálogo, no del motor de cargas ni del análisis (la
 carga distribuida calculada, ~4.8 kN/m, coincide con el valor real de
 SAP2000 de la memoria, ~4.92 kN/m). Para un diseño definitivo, reemplazar
 `Section.Sy` por el valor certificado del fabricante.
+
+**Por qué los valores de Vortex se acercan pero no coinciden exactamente
+con una memoria de SAP2000 existente:** al examinar la tabla "Frame
+Section Assignments" completa de la memoria de referencia se observa que
+el modelo SAP2000 original está compuesto por bloques repetidos de 6
+elementos PARAL + 5 elementos VIGA cada uno (no un pórtico 3D continuo
+de varias bahías conectadas entre sí) — es decir, el calculista analizó
+cada "torre" como un subsistema 2D con su propio reparto de cargas,
+mientras que Vortex arma y resuelve un **pórtico espacial 3D único y
+continuo** con todas las bahías conectadas (método más riguroso, que no
+requiere decidir a mano cuánta carga tributaria le corresponde a cada
+columna). Esta diferencia de topología —no un error de fórmulas— es la
+causa de que P coincida razonablemente bien (ambos métodos reparten la
+carga vertical de forma similar) pero M y V no coincidan elemento a
+elemento. Reproducir exactamente esa topología 2D específica requeriría
+conocer las condiciones de apoyo y de conexión exactas del archivo
+`.sdb` original, que no están recuperables desde las tablas de resultados
+exportadas a Word.
 
 ## ⚠️ Advertencia — uso profesional
 
