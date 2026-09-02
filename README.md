@@ -163,9 +163,19 @@ Arriostramiento, Cargas, Sismo):
    sísmicos, conteo de fallas) a un modelo LLM a través de la API de
    [Groq](https://console.groq.com/keys) y muestra recomendaciones de
    ingeniería en lenguaje natural. Requiere una API key gratuita de Groq
-   (campo en el panel, o variable de entorno `GROQ_API_KEY`) y conexión a
-   internet; es una ayuda de lectura rápida de resultados, **no** un
-   chequeo normativo ni un sustituto del criterio del calculista.
+   y conexión a internet; es una ayuda de lectura rápida de resultados,
+   **no** un chequeo normativo ni un sustituto del criterio del calculista.
+
+   La API key se puede pegar en el campo del panel y presionar **💾
+   Guardar** para que quede en un archivo local `.groq_api_key` (creado
+   en la raíz del proyecto) y no haya que volver a escribirla cada vez
+   que se abre Vortex — ese archivo está en `.gitignore`, así que nunca
+   se sube al repositorio. También puede definirse como variable de
+   entorno `GROQ_API_KEY` (tiene prioridad sobre el archivo). Los
+   nombres de modelo de Groq cambian con el tiempo y según la cuenta; si
+   el modelo por defecto da un error "model_not_found", presione el
+   botón **🔄** junto al selector de modelo para listar los modelos
+   realmente disponibles para esa API key y elegir uno de ahí.
 
 **Ejemplo de línea de comandos** (reconstruye un caso de referencia y
 genera su memoria de cálculo):

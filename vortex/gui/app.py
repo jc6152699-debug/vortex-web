@@ -29,7 +29,10 @@ from ..analysis import (
 )
 from ..report import ProjectInfo, ReportData, generate_memoria
 from ..units import kgf_to_kn
-from ..ai import AdvisorError, DEFAULT_MODEL, AVAILABLE_MODELS, build_results_summary, get_recommendations
+from ..ai import (
+    AdvisorError, DEFAULT_MODEL, AVAILABLE_MODELS, build_results_summary,
+    get_recommendations, list_available_models, load_local_api_key, save_local_api_key,
+)
 from .viewer3d import Viewer3D
 from .legend import ColorLegend
 from .theme import apply_dark_theme
@@ -61,6 +64,27 @@ class _AdvisorWorker(QtCore.QObject):
             self.failed.emit(f"Error inesperado consultando la IA: {exc}")
 
 
+class _ModelListWorker(QtCore.QObject):
+    """Consulta en un hilo aparte la lista real de modelos de Groq
+    disponibles para una API key dada."""
+
+    finished = QtCore.Signal(list)
+    failed = QtCore.Signal(str)
+
+    def __init__(self, api_key: str):
+        super().__init__()
+        self._api_key = api_key
+
+    def run(self) -> None:
+        try:
+            models = list_available_models(self._api_key)
+            self.finished.emit(models)
+        except AdvisorError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # defensivo: nunca dejar el hilo morir en silencio
+            self.failed.emit(f"Error inesperado listando modelos: {exc}")
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -73,6 +97,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.last_inputs: Optional[PipelineInputs] = None
         self._ai_thread: Optional[QtCore.QThread] = None
         self._ai_worker: Optional[_AdvisorWorker] = None
+        self._models_thread: Optional[QtCore.QThread] = None
+        self._models_worker: Optional[_ModelListWorker] = None
 
         self._build_toolbar()
         self._build_ui()
@@ -316,16 +342,39 @@ class MainWindow(QtWidgets.QMainWindow):
 
         cfg_box = QtWidgets.QGroupBox("Configuración (Groq)")
         cfg_form = QtWidgets.QFormLayout(cfg_box)
+
+        key_row = QtWidgets.QHBoxLayout()
         self.ed_groq_key = QtWidgets.QLineEdit()
         self.ed_groq_key.setEchoMode(QtWidgets.QLineEdit.Password)
         self.ed_groq_key.setPlaceholderText("gsk_...")
-        self.ed_groq_key.setText(os.environ.get("GROQ_API_KEY", ""))
+        self.ed_groq_key.setText(load_local_api_key())
+        key_row.addWidget(self.ed_groq_key, 1)
+        btn_save_key = QtWidgets.QPushButton("💾 Guardar")
+        btn_save_key.setToolTip(
+            "Guarda la API key en un archivo local (.groq_api_key, en la raíz "
+            "del proyecto) para no tener que volver a escribirla cada vez que "
+            "se abre Vortex. Ese archivo nunca se sube a git (ver .gitignore)."
+        )
+        btn_save_key.clicked.connect(self._on_save_groq_key)
+        key_row.addWidget(btn_save_key)
+        cfg_form.addRow("API key", key_row)
+
+        model_row = QtWidgets.QHBoxLayout()
         self.cb_ai_model = QtWidgets.QComboBox()
         self.cb_ai_model.setEditable(True)
         self.cb_ai_model.addItems(AVAILABLE_MODELS)
         self.cb_ai_model.setCurrentText(DEFAULT_MODEL)
-        cfg_form.addRow("API key", self.ed_groq_key)
-        cfg_form.addRow("Modelo", self.cb_ai_model)
+        model_row.addWidget(self.cb_ai_model, 1)
+        self.btn_refresh_models = QtWidgets.QPushButton("🔄")
+        self.btn_refresh_models.setToolTip(
+            "Consultar en Groq la lista real de modelos disponibles para esta "
+            "API key (los nombres de modelo cambian con el tiempo; use esto "
+            "si un modelo da error \"model_not_found\")."
+        )
+        self.btn_refresh_models.clicked.connect(self.on_refresh_ai_models)
+        model_row.addWidget(self.btn_refresh_models)
+        cfg_form.addRow("Modelo", model_row)
+
         hint = QtWidgets.QLabel(
             "Obtén una API key gratuita en console.groq.com/keys. Requiere "
             "conexión a internet; la clave sólo se usa localmente para "
@@ -717,7 +766,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._ai_thread is not None and self._ai_thread.isRunning():
             return  # ya hay una consulta en curso
 
-        api_key = self.ed_groq_key.text().strip() or os.environ.get("GROQ_API_KEY", "")
+        api_key = self.ed_groq_key.text().strip() or load_local_api_key()
         model = self.cb_ai_model.currentText().strip() or DEFAULT_MODEL
         summary = build_results_summary(self.model, self.pipeline_result, self.last_inputs)
 
@@ -744,6 +793,60 @@ class MainWindow(QtWidgets.QMainWindow):
         self.txt_ai_output.setPlainText(f"⚠ {msg}")
         self.btn_ai_recommend.setEnabled(True)
         self.status.showMessage("La consulta a la IA falló. Ver detalle en el panel.")
+
+    def _on_save_groq_key(self) -> None:
+        api_key = self.ed_groq_key.text().strip()
+        if not api_key:
+            QtWidgets.QMessageBox.warning(self, "Vortex", "Escriba primero una API key para guardarla.")
+            return
+        try:
+            save_local_api_key(api_key)
+            QtWidgets.QMessageBox.information(
+                self, "Vortex",
+                "API key guardada en .groq_api_key (raíz del proyecto). "
+                "Se cargará automáticamente la próxima vez que abra Vortex; "
+                "ese archivo no se sube a git."
+            )
+            self.status.showMessage("API key de Groq guardada localmente.")
+        except OSError as exc:
+            self._show_error("Error al guardar la API key", exc)
+
+    def on_refresh_ai_models(self) -> None:
+        if self._models_thread is not None and self._models_thread.isRunning():
+            return  # ya hay una consulta en curso
+        api_key = self.ed_groq_key.text().strip() or load_local_api_key()
+        if not api_key:
+            QtWidgets.QMessageBox.warning(
+                self, "Vortex", "Escriba (o guarde) primero una API key de Groq."
+            )
+            return
+
+        self.btn_refresh_models.setEnabled(False)
+        self.status.showMessage("Consultando los modelos disponibles en Groq...")
+
+        self._models_thread = QtCore.QThread(self)
+        self._models_worker = _ModelListWorker(api_key)
+        self._models_worker.moveToThread(self._models_thread)
+        self._models_thread.started.connect(self._models_worker.run)
+        self._models_worker.finished.connect(self._on_models_listed)
+        self._models_worker.failed.connect(self._on_models_list_failed)
+        self._models_worker.finished.connect(self._models_thread.quit)
+        self._models_worker.failed.connect(self._models_thread.quit)
+        self._models_thread.finished.connect(self._models_thread.deleteLater)
+        self._models_thread.start()
+
+    def _on_models_listed(self, models: list) -> None:
+        current = self.cb_ai_model.currentText().strip()
+        self.cb_ai_model.clear()
+        self.cb_ai_model.addItems(models)
+        self.cb_ai_model.setCurrentText(current if current in models else models[0])
+        self.btn_refresh_models.setEnabled(True)
+        self.status.showMessage(f"{len(models)} modelo(s) disponibles en tu cuenta de Groq.")
+
+    def _on_models_list_failed(self, msg: str) -> None:
+        self.btn_refresh_models.setEnabled(True)
+        self.status.showMessage("No se pudo consultar la lista de modelos de Groq.")
+        QtWidgets.QMessageBox.warning(self, "Vortex", msg)
 
     def _show_error(self, title: str, exc: Exception) -> None:
         detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
