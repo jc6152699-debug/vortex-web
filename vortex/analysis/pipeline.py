@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from ..geometry.model import MemberKind, RackModel
-from ..loads.dead_live import dead_load_uprights
+from ..loads.distribution import LoadDistribution, build_load_distribution
 from ..loads.combinations import lrfd_combinations, LoadCase, Combination
 from ..loads import seismic as sm
 from ..design.upright_cfs import check_upright_compression_bending, UprightCheckResult
@@ -77,6 +77,7 @@ class PipelineResult:
     pl_grand_total_kn: float = 0.0    # kN, carga de producto de TODO el rack (todas las bahías x niveles)
     ll_total_kn: float = 0.0            # kN, carga viva por nivel (todas las bahías)
     ll_grand_total_kn: float = 0.0        # kN, carga viva de TODO el rack (todas las bahías x niveles)
+    load_distribution: Optional[LoadDistribution] = None  # reparto DL/PL/LL por viga (frame/bahía/nivel/lado)
 
     def max_ratio(self) -> float:
         return max((r.ratio for r in self.member_rows.values()), default=0.0)
@@ -87,32 +88,32 @@ def _nodes_at_elevation(model: RackModel, z: float, tol: float = 1e-6) -> List[i
 
 
 def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
-    dl_by_member = dead_load_uprights(model)
-    dl_total = sum(dl_by_member.values())
+    # Reparto de cargas DL/PL/LL sobre el modelo, armado una sola vez aquí
+    # y reutilizado en todo el resto de la función (y por
+    # `element_forces_table`, más abajo) — ver `loads.distribution` para
+    # el detalle del reparto por marco/bahía/nivel/lado.
+    dist = build_load_distribution(model, inputs.pl_per_level_kn, inputs.ll_kn_m2)
+    dl_by_member = dist.dl_by_member
+    dl_total = dist.dl_total_kn
     n_levels = model.n_levels
-    dl_per_level = dl_total / n_levels if n_levels else 0.0
+    dl_per_level = dist.dl_per_level_kn
     n_bays_total = model.n_bays
 
-    dl_loads = [
-        MemberLoad(member_id=mid, wz=-(w / model.member_length(model.members[mid])))
-        for mid, w in dl_by_member.items() if model.member_length(model.members[mid]) > 1e-9
-    ]
-    pl_loads = []
-    for m in model.members_of_kind(MemberKind.BEAM):
-        w_pl = (inputs.pl_per_level_kn / 2.0) / model.bay_length
-        pl_loads.append(MemberLoad(member_id=m.id, wz=-w_pl))
+    # `dist.dl_loads/pl_loads/ll_loads` son `DistributedLoad` (member_id,
+    # wz) desacoplados de `analysis` — se envuelven aquí en `MemberLoad`
+    # real para alimentar el motor de análisis matricial (`analyze`).
+    dl_loads = [MemberLoad(member_id=d.member_id, wz=d.wz) for d in dist.dl_loads]
+    w_pl_beam = dist.w_pl_beam_kn_m
+    pl_loads = [MemberLoad(member_id=d.member_id, wz=d.wz) for d in dist.pl_loads]
 
     # Carga viva (LL, kN/m²): se asume una carga de área (p.ej. pasarela de
     # acceso) tributaria a las dos vigas de cada nivel, igual que la carga
     # de producto — ancho tributario = profundidad de marco / 2 por viga.
-    w_ll_beam = inputs.ll_kn_m2 * model.frame_depth / 2.0
-    ll_loads = [
-        MemberLoad(member_id=m.id, wz=-w_ll_beam)
-        for m in model.members_of_kind(MemberKind.BEAM)
-    ]
+    w_ll_beam = dist.w_ll_beam_kn_m
+    ll_loads = [MemberLoad(member_id=d.member_id, wz=d.wz) for d in dist.ll_loads]
 
-    pl_total = inputs.pl_per_level_kn * n_bays_total   # kN, por nivel (todas las bahías)
-    ll_total = inputs.ll_kn_m2 * model.bay_length * model.frame_depth * n_bays_total  # ídem
+    pl_total = dist.pl_total_kn   # kN, por nivel (todas las bahías)
+    ll_total = dist.ll_total_kn  # ídem
     levels_w = [
         sm.LevelWeight(i, model.level_elevations[i],
                         weight_kn=sm.seismic_weight(pl=pl_total, dl=dl_per_level, ll=ll_total, plrf=1.0))
@@ -120,35 +121,32 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
     ]
     height_total = model.level_elevations[-1] if model.level_elevations else 0.0
 
-    # Ws/V (numeral 1.1.3 de la memoria) son el peso sísmico y el cortante
-    # de BASE de TODA la estantería, así que deben construirse con los
-    # totales de TODO el rack (todos los niveles): dl_total (no
-    # dl_per_level, que es sólo la fracción de UN nivel) y pl_total/ll_total
-    # multiplicados por n_levels (pl_total/ll_total, tal como se definen
-    # arriba, son el total de UN solo nivel repartido en todas las bahías).
-    # `levels_w`, en cambio, sí debe seguir usando el peso de UN nivel
-    # (dl_per_level, pl_total, ll_total) porque sólo sirve para repartir V
-    # proporcionalmente entre niveles según su peso relativo — y por
-    # construcción la suma de esos pesos por nivel (n_levels veces el peso
-    # de un nivel, ya que aquí son iguales) debe coincidir con Ws_total,
-    # o la distribución vertical quedaría inconsistente con el cortante de
-    # base que se está distribuyendo (antes Ws_total == el peso de UN solo
-    # nivel, es decir ~1/n_levels del real, subestimando V y por tanto las
-    # fuerzas sísmicas aplicadas al modelo en la misma proporción).
-    pl_all_levels = pl_total * n_levels
-    ll_all_levels = ll_total * n_levels
+    # NOTA (revisión estructural): se evaluó computar Ws/V con el peso de
+    # TODA la estantería (dl_total y pl/ll de todos los niveles) en vez del
+    # peso de un solo nivel, razonando que "V" ("cortante sísmico de base")
+    # debería ser el cortante total del sistema. Se revirtió esa idea: con
+    # los valores por defecto (proyecto real LOGISTOOL, ver
+    # tests/test_logistool_reference.py), esa alternativa da V≈28.7 kN
+    # longitudinal, un 417% por encima del valor REAL documentado en la
+    # memoria de cálculo firmada (~5.55 kN, que sí reproduce la fórmula
+    # actual con el peso de un solo nivel). O sea: el método simplificado
+    # de NTC 5689 numeral 2.7, tal como se aplica en la práctica real, usa
+    # el peso tributario de un nivel representativo para Ws/V — no el peso
+    # total de la estantería — y ese V ya es lo que se reparte por altura
+    # entre niveles (ver `sm.vertical_distribution`). No cambiar esto sin
+    # volver a validar contra ese mismo proyecto de referencia.
     seis_trans = sm.compute_seismic(
         direction=sm.SeismicDirection.TRANSVERSAL,
         soil_type=inputs.seismic.soil_type, aa=inputs.seismic.aa, av=inputs.seismic.av,
-        pl=pl_all_levels, dl=dl_total, ll=ll_all_levels, height_m=height_total, levels=levels_w,
+        pl=pl_total, dl=dl_per_level, ll=ll_total, height_m=height_total, levels=levels_w,
         essential=inputs.seismic.essential, hazardous_contents=inputs.seismic.hazardous_contents,
         public_access=inputs.seismic.public_access,
     )
     seis_long = sm.compute_seismic(
         direction=sm.SeismicDirection.LONGITUDINAL,
         soil_type=inputs.seismic.soil_type, aa=inputs.seismic.aa, av=inputs.seismic.av,
-        pl=pl_all_levels, dl=dl_total, ll=ll_all_levels, height_m=height_total, levels=levels_w,
-        pl_promedio=inputs.seismic.pl_promedio_ratio * pl_all_levels, pl_maxima=pl_all_levels,
+        pl=pl_total, dl=dl_per_level, ll=ll_total, height_m=height_total, levels=levels_w,
+        pl_promedio=inputs.seismic.pl_promedio_ratio * pl_total, pl_maxima=pl_total,
         essential=inputs.seismic.essential, hazardous_contents=inputs.seismic.hazardous_contents,
         public_access=inputs.seismic.public_access,
     )
@@ -181,9 +179,8 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
         dl_total_kn=dl_total, dl_per_level_kn=dl_per_level,
         pl_total_kn=pl_total, pl_grand_total_kn=pl_total * n_levels,
         ll_total_kn=ll_total, ll_grand_total_kn=ll_total * n_levels,
+        load_distribution=dist,
     )
-
-    w_pl_beam = (inputs.pl_per_level_kn / 2.0) / model.bay_length
 
     for member in model.members_of_kind(MemberKind.UPRIGHT):
         best_ratio, best_combo, best_detail, best_p, best_r = -1.0, "", "", 0.0, None
@@ -355,9 +352,10 @@ def element_forces_table(
     es puramente axial (sin componente transversal), y ningún patrón de
     carga aplica carga distribuida en el eje local y de ningún elemento.
     """
-    dl_by_member = dead_load_uprights(model)
-    w_pl_beam = (inputs.pl_per_level_kn / 2.0) / model.bay_length
-    w_ll_beam = inputs.ll_kn_m2 * model.frame_depth / 2.0
+    dist = build_load_distribution(model, inputs.pl_per_level_kn, inputs.ll_kn_m2)
+    dl_by_member = dist.dl_by_member
+    w_pl_beam = dist.w_pl_beam_kn_m
+    w_ll_beam = dist.w_ll_beam_kn_m
 
     combo_ids = ("1", "2", "5")
     seen_ids = set()

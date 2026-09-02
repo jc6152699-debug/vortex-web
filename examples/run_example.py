@@ -51,9 +51,9 @@ def main() -> None:
     # de cálculo, usado aquí sólo para ilustrar secciones de catálogo real.
     brace = catalog["RIOSTRA 25x40x10x1.5mm"]
 
-    n_bays = 4
+    n_bays = 5
     frame_depth = 1.06
-    level_heights = [1.20, 1.80, 1.80, 1.80, 1.80, 1.80]
+    level_heights = [1.20, 1.80, 1.80, 1.80, 1.80]
 
     # Arriostramiento configurable por ángulo objetivo (incluye 70°, como
     # en el plano de fabricación): el número de niveles por panel de

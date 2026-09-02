@@ -33,6 +33,7 @@ from ..units import kgf_to_kn
 from .viewer3d import Viewer3D
 from .legend import ColorLegend
 from .theme import apply_dark_theme
+from .diagrams_dialog import DiagramsDialog
 
 SOIL_TYPES = ["A", "B", "C", "D", "E"]
 BRACE_ANGLES_DEG = [30, 45, 60, 65, 70, 75]
@@ -63,11 +64,21 @@ GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 # texto-a-voz), lo cual nunca iba a funcionar para esto. Esta lista fija
 # sólo tiene modelos de chat conocidos; si Groq retira uno, el sistema
 # simplemente prueba el siguiente sin que el usuario tenga que hacer nada.
+#
+# Lista actualizada 2026-09-02 según la página oficial de deprecaciones de
+# Groq (https://console.groq.com/docs/deprecations): a esa fecha, TODOS los
+# modelos que antes estaban aquí (llama-3.1-8b-instant, llama-3.3-70b-
+# versatile, llama-3.1-70b-versatile, gemma2-9b-it) ya habían sido retirados
+# ("model_decommissioned"). Los modelos de producción vigentes recomendados
+# por Groq como reemplazo son openai/gpt-oss-120b y openai/gpt-oss-20b;
+# qwen/qwen3.6-27b se deja como tercera opción (modelo "preview" de Groq,
+# no garantizado para producción, pero útil como último respaldo). Si en el
+# futuro alguno de éstos también se retira, revisar esa misma página y
+# actualizar esta lista — el resto del código no necesita cambios.
 CANDIDATE_MODELS = [
-    "llama-3.1-8b-instant",
-    "llama-3.3-70b-versatile",
-    "llama-3.1-70b-versatile",
-    "gemma2-9b-it",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.6-27b",
 ]
 
 SYSTEM_PROMPT = (
@@ -181,6 +192,12 @@ def get_recommendations(
         if code == "model_not_found":
             raise AdvisorError(f"model_not_found: el modelo '{model}' no está disponible.")
         raise AdvisorError(f"Groq respondió con error HTTP 404: {resp.text[:500]}")
+    if resp.status_code == 400 and _groq_error_code(resp) == "model_decommissioned":
+        raise AdvisorError(
+            f"model_decommissioned: Groq retiró el modelo '{model}'. Revise "
+            f"https://console.groq.com/docs/deprecations y actualice "
+            f"CANDIDATE_MODELS en vortex/gui/app.py con el reemplazo vigente."
+        )
     if resp.status_code >= 400:
         raise AdvisorError(f"Groq respondió con error HTTP {resp.status_code}: {resp.text[:500]}")
 
@@ -270,21 +287,75 @@ class MainWindow(QtWidgets.QMainWindow):
         toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
         self.addToolBar(toolbar)
 
-        act_build = QtGui.QAction("🧱  1. Construir modelo", self)
-        act_build.triggered.connect(self.on_build_model)
-        toolbar.addAction(act_build)
+        # "Más herramientas" va PRIMERO (a la izquierda) y como menú
+        # desplegable — patrón estándar de software CAD/ingeniería
+        # profesional (Inventor, SolidWorks, ANSYS): las acciones menos
+        # frecuentes (construir, analizar, exportar) quedan agrupadas bajo
+        # un único botón con flecha, en vez de una ventana aparte o de
+        # llenar la barra de íconos sueltos.
+        self.btn_tools = QtWidgets.QToolButton()
+        self.btn_tools.setText("🗂  Más herramientas ▾")
+        self.btn_tools.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.btn_tools.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        menu_tools = QtWidgets.QMenu(self.btn_tools)
 
-        act_analyze = QtGui.QAction("📊  2. Analizar y verificar", self)
+        act_build = menu_tools.addAction("🧱  Construir modelo")
+        act_build.setToolTip("Arma la geometría 3D a partir del formulario.")
+        act_build.triggered.connect(self.on_build_model)
+
+        act_analyze = menu_tools.addAction("📊  Analizar y verificar")
+        act_analyze.setToolTip("Corre el análisis matricial y la verificación normativa.")
         act_analyze.triggered.connect(self.on_analyze)
-        toolbar.addAction(act_analyze)
+
+        menu_tools.addSeparator()
+
+        act_export = menu_tools.addAction("📄  Memoria de cálculo (.docx)")
+        act_export.triggered.connect(self.on_export)
+
+        act_export_forces = menu_tools.addAction("📈  Fuerzas por elemento (.csv)")
+        act_export_forces.triggered.connect(self.on_export_element_forces)
+
+        menu_tools.addSeparator()
+
+        # El panel de recomendaciones de IA ahora es un panel acoplable
+        # (dock) siempre visible junto al visor 3D, no una pestaña que se
+        # pueda perder de vista — `toggleViewAction()` es el mecanismo
+        # nativo de Qt para mostrar/ocultar ese panel (equivalente al menú
+        # "Ver" de un programa de escritorio profesional).
+        act_toggle_ai = menu_tools.addAction(
+            "🤖  Mostrar/ocultar panel de Recomendaciones IA"
+        )
+        act_toggle_ai.triggered.connect(self._on_ai_toolbar_clicked)
+
+        self.btn_tools.setMenu(menu_tools)
+        toolbar.addWidget(self.btn_tools)
+
+        # "Vista" — segundo desplegable, justo al lado de "Más
+        # herramientas": agrupa los controles de uso ocasional del visor
+        # 3D (líneas de fuerzas y encuadre/zoom) que antes ocupaban una
+        # fila fija debajo del visor. Al ser un QWidgetAction dentro de un
+        # QMenu, el usuario interactúa con los controles reales sin que
+        # el menú se cierre en cada clic (mismo patrón que un panel de
+        # "Vista" de un programa CAD profesional).
+        self.btn_view = QtWidgets.QToolButton()
+        self.btn_view.setText("👁  Vista ▾")
+        self.btn_view.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.btn_view.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        menu_view = QtWidgets.QMenu(self.btn_view)
+        view_panel = self._build_view_menu_panel()
+        act_view_panel = QtWidgets.QWidgetAction(menu_view)
+        act_view_panel.setDefaultWidget(view_panel)
+        menu_view.addAction(act_view_panel)
+        self.btn_view.setMenu(menu_view)
+        toolbar.addWidget(self.btn_view)
+
+        toolbar.addSeparator()
 
         act_update = QtGui.QAction("🔄  Actualizar", self)
         act_update.setToolTip(
             "Reconstruye el modelo con los valores actuales del formulario y "
             "vuelve a analizar, en un solo clic — use esto después de cambiar "
-            "cualquier dato (geometría, secciones, cargas, sismo); \"Analizar\" "
-            "por sí solo NO reconstruye el modelo, así que un cambio de "
-            "sección u otra geometría no se reflejaría en los resultados."
+            "cualquier dato (geometría, secciones, cargas, sismo)."
         )
         act_update.triggered.connect(self.on_update)
         toolbar.addAction(act_update)
@@ -298,21 +369,116 @@ class MainWindow(QtWidgets.QMainWindow):
         act_clear.triggered.connect(self.on_clear)
         toolbar.addAction(act_clear)
 
-        toolbar.addSeparator()
+        act_diagrams = QtWidgets.QToolButton()
+        act_diagrams.setText("📐  Diagramas y especificaciones ▾")
+        act_diagrams.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        act_diagrams.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        act_diagrams.setToolTip(
+            "Diagrama de cargas de producto, diagrama de cargas de sismo "
+            "(calculado, con tabla NIVEL/FX), diagramas de momento, fuerza "
+            "axial y cortante (estilo SAP2000), y especificaciones de cada "
+            "sección de paral."
+        )
+        menu_diagrams = QtWidgets.QMenu(act_diagrams)
+        diagram_tabs = [
+            ("🖼  Cargas de producto", 0),
+            ("🌍  Cargas de sismo", 1),
+            ("📐  Diagrama de momentos", 2),
+            ("📊  Diagrama de fuerza axial", 3),
+            ("✂️  Diagrama de cortante", 4),
+            ("📋  Especificaciones de parales", 5),
+        ]
+        for label, tab_index in diagram_tabs:
+            act = menu_diagrams.addAction(label)
+            act.triggered.connect(
+                lambda checked=False, i=tab_index: self.on_open_diagrams_dialog(i)
+            )
+        act_diagrams.setMenu(menu_diagrams)
+        toolbar.addWidget(act_diagrams)
 
-        act_export = QtGui.QAction("📄  Memoria de cálculo (.docx)", self)
-        act_export.triggered.connect(self.on_export)
-        toolbar.addAction(act_export)
+    def _build_view_menu_panel(self) -> QtWidgets.QWidget:
+        """
+        Panel embebido en el desplegable "👁 Vista" de la barra de
+        herramientas: controles de "Líneas de fuerzas" (antes fijos
+        debajo del visor 3D) + el nuevo control de "Encuadre" (zoom/ajuste
+        de la vista al tamaño del estante). Los widgets creados aquí
+        (`self.chk_show_diagram`, etc.) son los MISMOS objetos que usa el
+        resto de la clase (`_on_diagram_changed`, `on_build_model`, ...) —
+        sólo cambia dónde viven visualmente.
+        """
+        panel = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(panel)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
 
-        act_export_forces = QtGui.QAction("📈  Fuerzas por elemento (.csv)", self)
-        act_export_forces.triggered.connect(self.on_export_element_forces)
-        toolbar.addAction(act_export_forces)
+        lbl_diagram = QtWidgets.QLabel("Líneas de fuerzas (visor 3D)")
+        lbl_diagram.setStyleSheet("font-weight: 600;")
+        layout.addWidget(lbl_diagram)
 
-        toolbar.addSeparator()
+        self.chk_show_diagram = QtWidgets.QCheckBox("Mostrar")
+        self.chk_show_diagram.setEnabled(False)
+        self.chk_show_diagram.toggled.connect(self._on_diagram_changed)
+        layout.addWidget(self.chk_show_diagram)
 
-        act_ai = QtGui.QAction("🤖  Recomendaciones IA", self)
-        act_ai.triggered.connect(self._on_ai_toolbar_clicked)
-        toolbar.addAction(act_ai)
+        row1 = QtWidgets.QHBoxLayout()
+        row1.addWidget(QtWidgets.QLabel("Patrón"))
+        self.cb_diagram_pattern = QtWidgets.QComboBox()
+        self.cb_diagram_pattern.addItems(["DL", "PL", "LL", "EL_X", "EL_Y"])
+        self.cb_diagram_pattern.currentIndexChanged.connect(self._on_diagram_changed)
+        row1.addWidget(self.cb_diagram_pattern, 1)
+        layout.addLayout(row1)
+
+        row2 = QtWidgets.QHBoxLayout()
+        row2.addWidget(QtWidgets.QLabel("Componente"))
+        self.cb_diagram_component = QtWidgets.QComboBox()
+        self.cb_diagram_component.addItems(["P", "M2", "M3", "V2", "V3"])
+        self.cb_diagram_component.setCurrentText("M2")
+        self.cb_diagram_component.currentIndexChanged.connect(self._on_diagram_changed)
+        row2.addWidget(self.cb_diagram_component, 1)
+        layout.addLayout(row2)
+
+        row3 = QtWidgets.QHBoxLayout()
+        row3.addWidget(QtWidgets.QLabel("Escala"))
+        self.sp_diagram_scale = QtWidgets.QDoubleSpinBox()
+        self.sp_diagram_scale.setRange(0.1, 10.0)
+        self.sp_diagram_scale.setSingleStep(0.1)
+        self.sp_diagram_scale.setValue(1.0)
+        self.sp_diagram_scale.valueChanged.connect(self._on_diagram_changed)
+        row3.addWidget(self.sp_diagram_scale, 1)
+        layout.addLayout(row3)
+
+        line = QtWidgets.QFrame()
+        line.setFrameShape(QtWidgets.QFrame.HLine)
+        layout.addWidget(line)
+
+        lbl_frame = QtWidgets.QLabel("Encuadre del estante (zoom del visor 3D)")
+        lbl_frame.setStyleSheet("font-weight: 600;")
+        layout.addWidget(lbl_frame)
+
+        row4 = QtWidgets.QHBoxLayout()
+        row4.addWidget(QtWidgets.QLabel("Tamaño"))
+        self.sp_view_zoom = QtWidgets.QDoubleSpinBox()
+        self.sp_view_zoom.setRange(0.3, 5.0)
+        self.sp_view_zoom.setSingleStep(0.1)
+        self.sp_view_zoom.setValue(1.6)
+        self.sp_view_zoom.setToolTip(
+            "Distancia de la cámara = mayor dimensión del estante x este "
+            "factor. Valores menores acercan la vista (estante se ve más "
+            "grande); valores mayores la alejan (estante se ve más pequeño)."
+        )
+        self.sp_view_zoom.valueChanged.connect(self._on_view_zoom_changed)
+        row4.addWidget(self.sp_view_zoom, 1)
+        layout.addLayout(row4)
+
+        btn_fit = QtWidgets.QPushButton("🔍  Ajustar encuadre")
+        btn_fit.setToolTip("Vuelve a centrar y ajustar la cámara al tamaño actual del estante.")
+        btn_fit.clicked.connect(lambda: self.viewer.fit_view(self.sp_view_zoom.value()))
+        layout.addWidget(btn_fit)
+
+        return panel
+
+    def _on_view_zoom_changed(self, value: float) -> None:
+        self.viewer.fit_view(value)
 
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget()
@@ -350,29 +516,14 @@ class MainWindow(QtWidgets.QMainWindow):
         legend_row.addWidget(self.legend, 1)
         viewer_layout.addLayout(legend_row)
 
-        diagram_row = QtWidgets.QHBoxLayout()
-        self.chk_show_diagram = QtWidgets.QCheckBox("Líneas de fuerzas")
-        self.chk_show_diagram.setEnabled(False)
-        self.chk_show_diagram.toggled.connect(self._on_diagram_changed)
-        diagram_row.addWidget(self.chk_show_diagram)
-        self.cb_diagram_pattern = QtWidgets.QComboBox()
-        self.cb_diagram_pattern.addItems(["DL", "PL", "LL", "EL_X", "EL_Y"])
-        self.cb_diagram_pattern.currentIndexChanged.connect(self._on_diagram_changed)
-        diagram_row.addWidget(self.cb_diagram_pattern)
-        self.cb_diagram_component = QtWidgets.QComboBox()
-        self.cb_diagram_component.addItems(["P", "M2", "M3", "V2", "V3"])
-        self.cb_diagram_component.setCurrentText("M2")
-        self.cb_diagram_component.currentIndexChanged.connect(self._on_diagram_changed)
-        diagram_row.addWidget(self.cb_diagram_component)
-        self.sp_diagram_scale = QtWidgets.QDoubleSpinBox()
-        self.sp_diagram_scale.setRange(0.1, 10.0)
-        self.sp_diagram_scale.setSingleStep(0.1)
-        self.sp_diagram_scale.setValue(1.0)
-        self.sp_diagram_scale.valueChanged.connect(self._on_diagram_changed)
-        diagram_row.addWidget(QtWidgets.QLabel("Escala"))
-        diagram_row.addWidget(self.sp_diagram_scale)
-        diagram_row.addStretch(1)
-        viewer_layout.addLayout(diagram_row)
+        # NOTA: los controles de "Líneas de fuerzas" (patrón/componente/
+        # escala) y de encuadre del visor 3D ya NO viven aquí debajo del
+        # visor — se movieron al menú desplegable "👁 Vista" de la barra
+        # de herramientas (ver `_build_toolbar`), para no ocupar espacio
+        # permanente con controles de uso ocasional (patrón profesional
+        # de "panel de vista" tipo Inventor/SolidWorks). Los widgets
+        # (`self.chk_show_diagram`, etc.) se siguen creando en
+        # `_build_view_menu_panel` y funcionan exactamente igual.
 
         viewer_container.setMinimumHeight(160)
         right.addWidget(viewer_container)
@@ -395,7 +546,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.summary_panel, "📊 Cargas y sismo")
 
         self.ai_panel = self._build_ai_panel()
-        self.tabs.addTab(self.ai_panel, "🤖 Recomendaciones IA")
+        self.ai_dock = QtWidgets.QDockWidget("🤖 Recomendaciones IA", self)
+        self.ai_dock.setObjectName("aiDock")
+        self.ai_dock.setWidget(self.ai_panel)
+        self.ai_dock.setFeatures(
+            QtWidgets.QDockWidget.DockWidgetMovable
+            | QtWidgets.QDockWidget.DockWidgetFloatable
+            | QtWidgets.QDockWidget.DockWidgetClosable
+        )
+        self.ai_dock.setMinimumWidth(320)
+        # Panel acoplable SIEMPRE visible junto al visor 3D (no una pestaña
+        # que haya que recordar abrir) — igual que el panel de propiedades
+        # de un programa CAD/ingeniería profesional (Inventor, SolidWorks,
+        # ANSYS): la respuesta de la IA queda a la vista de inmediato en
+        # vez de escondida detrás de una pestaña inferior.
+        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.ai_dock)
+
+        self.load_diagram_panel = self._build_load_diagram_panel()
+        # NOTA: este panel ya NO se agrega como pestaña visible (quedaba
+        # duplicado con la pestaña "🖼 Cargas de producto" de la ventana
+        # "Diagramas y especificaciones"). Se sigue construyendo y
+        # actualizando internamente (on_build_model/on_analyze/on_clear lo
+        # usan) por si algún otro panel llega a necesitarlo, pero no ocupa
+        # espacio en la barra de pestañas principal.
 
         right.addWidget(self.tabs)
         right.setStretchFactor(0, 3)   # el visor 3D se lleva la mayor parte del espacio extra
@@ -537,6 +710,57 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.table_fx.setItem(i, j, QtWidgets.QTableWidgetItem(v))
         self.table_fx.resizeColumnsToContents()
 
+    def _build_load_diagram_panel(self) -> QtWidgets.QWidget:
+        """
+        Pestaña que muestra el diagrama de cargas de producto (bahía x
+        nivel, w en kN/m por viga — mismo dibujo que exporta el botón
+        "Diagrama de cargas (.png)" de la barra de herramientas) como
+        imagen DENTRO de la interfaz, no sólo como archivo para guardar.
+        Se regenera cada vez que corre el análisis (`on_analyze`), a
+        partir de `pipeline_result.load_distribution` — el mismo reparto
+        de carga usado por el motor de análisis (`loads.distribution`).
+        """
+        outer = QtWidgets.QScrollArea()
+        outer.setWidgetResizable(True)
+        outer.setFrameShape(QtWidgets.QFrame.NoFrame)
+        outer.setAlignment(QtCore.Qt.AlignCenter)
+
+        self.lbl_load_diagram = QtWidgets.QLabel(
+            "Construya el modelo y presione \"Analizar y verificar\" para "
+            "ver aquí el diagrama de cargas de producto."
+        )
+        self.lbl_load_diagram.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_load_diagram.setWordWrap(True)
+        self.lbl_load_diagram.setStyleSheet("color: #96a1ad; padding: 24px;")
+        outer.setWidget(self.lbl_load_diagram)
+        return outer
+
+    def _populate_load_diagram_panel(self) -> None:
+        """Regenera el diagrama de cargas de producto y lo muestra en la
+        pestaña "🖼 Diagrama de cargas" como imagen (sin pasar por
+        disco: se renderiza a un buffer PNG en memoria)."""
+        if self.model is None or self.pipeline_result is None:
+            return
+        dist = self.pipeline_result.load_distribution
+        if dist is None:
+            return
+        try:
+            import io
+            from ..loads import plot_product_load_diagram
+            fig = plot_product_load_diagram(self.model, dist)
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=150)
+            import matplotlib.pyplot as plt
+            plt.close(fig)
+            pixmap = QtGui.QPixmap()
+            pixmap.loadFromData(buf.getvalue())
+            self.lbl_load_diagram.setPixmap(pixmap)
+            self.lbl_load_diagram.setText("")
+            self.lbl_load_diagram.adjustSize()
+        except Exception as exc:
+            self.lbl_load_diagram.setPixmap(QtGui.QPixmap())
+            self.lbl_load_diagram.setText(f"No se pudo generar el diagrama de cargas:\n{exc}")
+
     def _build_ai_panel(self) -> QtWidgets.QWidget:
         """
         Panel de recomendaciones de IA: envía un resumen numérico del
@@ -559,8 +783,25 @@ class MainWindow(QtWidgets.QMainWindow):
         panel = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(panel)
 
-        cfg_box = QtWidgets.QGroupBox("Configuración (Groq)")
-        cfg_form = QtWidgets.QFormLayout(cfg_box)
+        # "Configuración (Groq)" ahora es una sección desplegable/colapsable
+        # (colapsada por defecto) en vez de un bloque de texto siempre
+        # visible — así el panel de IA se ve limpio de entrada y el texto
+        # de configuración (detalles internos como el nombre del archivo
+        # de código o la variable de entorno) sólo aparece si el usuario
+        # decide abrirlo.
+        cfg_header = QtWidgets.QToolButton()
+        cfg_header.setText("▸  Configuración (Groq)")
+        cfg_header.setCheckable(True)
+        cfg_header.setChecked(False)
+        cfg_header.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        cfg_header.setStyleSheet(
+            "QToolButton { border: none; font-weight: 600; text-align: left; }"
+        )
+        layout.addWidget(cfg_header)
+
+        cfg_content = QtWidgets.QWidget()
+        cfg_form = QtWidgets.QFormLayout(cfg_content)
+        cfg_content.setVisible(False)
 
         # El modelo lo elige el sistema (CANDIDATE_MODELS, arriba en este
         # archivo): no hay selector ni lista para el usuario. Si un modelo
@@ -584,7 +825,13 @@ class MainWindow(QtWidgets.QMainWindow):
         key_status.setStyleSheet("color: #96a1ad; font-size: 10px;")
         self._lbl_groq_key_status = key_status
         cfg_form.addRow(key_status)
-        layout.addWidget(cfg_box)
+        layout.addWidget(cfg_content)
+
+        def _toggle_cfg(checked: bool) -> None:
+            cfg_content.setVisible(checked)
+            cfg_header.setText(("▾  " if checked else "▸  ") + "Configuración (Groq)")
+
+        cfg_header.toggled.connect(_toggle_cfg)
 
         self.btn_ai_recommend = QtWidgets.QPushButton("🤖  Analizar resultados con IA")
         self.btn_ai_recommend.setObjectName("primaryAction")
@@ -609,12 +856,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         geo_box = QtWidgets.QGroupBox("📐 Geometría")
         geo_form = QtWidgets.QFormLayout(geo_box)
-        self.sp_bays = QtWidgets.QSpinBox(); self.sp_bays.setRange(1, 50); self.sp_bays.setValue(4)
+        self.sp_bays = QtWidgets.QSpinBox(); self.sp_bays.setRange(1, 50); self.sp_bays.setValue(5)
         self.sp_bay_length = QtWidgets.QDoubleSpinBox(); self.sp_bay_length.setRange(0.5, 6.0)
         self.sp_bay_length.setValue(2.44); self.sp_bay_length.setSuffix(" m")
         self.sp_depth = QtWidgets.QDoubleSpinBox(); self.sp_depth.setRange(0.3, 3.0)
         self.sp_depth.setValue(1.06); self.sp_depth.setSuffix(" m")
-        self.sp_n_levels = QtWidgets.QSpinBox(); self.sp_n_levels.setRange(1, 20); self.sp_n_levels.setValue(6)
+        self.sp_n_levels = QtWidgets.QSpinBox(); self.sp_n_levels.setRange(1, 20); self.sp_n_levels.setValue(5)
         self.sp_h_first = QtWidgets.QDoubleSpinBox(); self.sp_h_first.setRange(0.3, 4.0)
         self.sp_h_first.setValue(1.20); self.sp_h_first.setSuffix(" m")
         self.sp_h_rest = QtWidgets.QDoubleSpinBox(); self.sp_h_rest.setRange(0.3, 4.0)
@@ -646,6 +893,15 @@ class MainWindow(QtWidgets.QMainWindow):
         sec_form.addRow("Paral", self.cb_upright)
         sec_form.addRow("Viga", self.cb_beam)
         sec_form.addRow("Diagonal", self.cb_brace)
+        # Valores por defecto = proyecto de referencia real (memoria de
+        # cálculo LOGISTOOL, estantería 9.50m x 6 niveles x 2400kg/nivel,
+        # Medellín): "VIGA CAJA 160x60x1.5mm" es la sección real de ese
+        # proyecto (ver comentario en sections/catalog.py) — NO la de caja
+        # 100x50x2.0mm que quedaba seleccionada por ser la primera de la
+        # lista. Si esta sección no está en el catálogo por algún motivo
+        # (p.ej. catálogo editado), `setCurrentText` simplemente no hace
+        # nada y queda la selección por defecto de Qt (primer ítem).
+        self.cb_beam.setCurrentText("VIGA CAJA 160x60x1.5mm")
         layout.addWidget(sec_box)
 
         brace_box = QtWidgets.QGroupBox("╱ Arriostramiento del marco (riostras)")
@@ -675,6 +931,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sp_pl.setValue(2400.0); self.sp_pl.setSuffix(" kgf / nivel-bahía")
         load_form.addRow("Carga de producto (PL)", self.sp_pl)
 
+        self.lbl_pl_kn = QtWidgets.QLabel()
+        self.lbl_pl_kn.setStyleSheet("color: #96a1ad; font-size: 10px;")
+        load_form.addRow("", self.lbl_pl_kn)
+        self.sp_pl.valueChanged.connect(self._on_pl_changed)
+        self._on_pl_changed(self.sp_pl.value())
+
         self.sp_ll = QtWidgets.QDoubleSpinBox(); self.sp_ll.setRange(0, 50)
         self.sp_ll.setValue(0.0); self.sp_ll.setSuffix(" kN/m²")
         load_form.addRow("Carga viva (LL)", self.sp_ll)
@@ -702,8 +964,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sp_aa = QtWidgets.QDoubleSpinBox(); self.sp_aa.setRange(0, 0.6); self.sp_aa.setDecimals(3)
         self.sp_av = QtWidgets.QDoubleSpinBox(); self.sp_av.setRange(0, 0.6); self.sp_av.setDecimals(3)
         self.cb_soil = QtWidgets.QComboBox(); self.cb_soil.addItems(SOIL_TYPES); self.cb_soil.setCurrentText("D")
+        self.sp_pl_promedio_ratio = QtWidgets.QDoubleSpinBox()
+        self.sp_pl_promedio_ratio.setRange(0.01, 1.0)
+        self.sp_pl_promedio_ratio.setDecimals(2)
+        self.sp_pl_promedio_ratio.setSingleStep(0.01)
+        # 0.76 = PLpromedio/PLmaxima del proyecto de referencia real
+        # (memoria de cálculo LOGISTOOL) — NTC 5689 numeral 2.7.2 exige
+        # este dato para la dirección longitudinal (no arriostrada); antes
+        # no había ningún control para editarlo y el motor usaba 1.0
+        # (PLRF=1.0, sismo longitudinal sobrestimado) sin que el usuario
+        # lo supiera.
+        self.sp_pl_promedio_ratio.setValue(0.76)
+        self.sp_pl_promedio_ratio.setToolTip(
+            "PLpromedio / PLmáxima (NTC 5689 numeral 2.7.2): reduce el peso "
+            "sísmico efectivo en la dirección longitudinal (no arriostrada, "
+            "vigas) cuando no todas las bahías están cargadas al máximo "
+            "simultáneamente. 1.0 = todas las bahías siempre a carga máxima "
+            "(conservador). No aplica a la dirección transversal (PLRF=1.0 "
+            "fijo ahí, ver numeral 2.7.2)."
+        )
         self.chk_el_relaxed = QtWidgets.QCheckBox("Factor EL=1.0 (relajación NTC 5689 num. 2.2)")
-        self.chk_el_relaxed.setChecked(True)
+        self.chk_el_relaxed.setChecked(False)
         self.chk_el_relaxed.setToolTip(
             "Desmarcar para usar EL=1.5 sin relajar (combinación literal "
             "1.2DL+1.5EL+0.85PL), como en el proyecto de referencia."
@@ -712,6 +993,7 @@ class MainWindow(QtWidgets.QMainWindow):
         seis_form.addRow("Aa", self.sp_aa)
         seis_form.addRow("Av", self.sp_av)
         seis_form.addRow("Tipo de perfil de suelo", self.cb_soil)
+        seis_form.addRow("PLpromedio/PLmáxima (long.)", self.sp_pl_promedio_ratio)
         seis_form.addRow(self.chk_el_relaxed)
         layout.addWidget(seis_box)
         self._on_city_changed(self.cb_city.currentText())
@@ -735,6 +1017,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if data:
             self.sp_aa.setValue(float(data["Aa"]))
             self.sp_av.setValue(float(data["Av"]))
+
+    def _on_pl_changed(self, value: float) -> None:
+        """Muestra en kN el valor de carga de producto (PL) que el
+        usuario diligencia en kgf — mismo campo, misma unidad que usa
+        internamente el motor de análisis (`PipelineInputs.pl_per_level_kn`,
+        vía `kgf_to_kn`)."""
+        self.lbl_pl_kn.setText(f"= {kgf_to_kn(value):.2f} kN / nivel-bahía")
 
     def _current_level_heights(self) -> list:
         n_levels = self.sp_n_levels.value()
@@ -808,6 +1097,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.results_table.setRowCount(0)
             self.table_fx.setRowCount(0)
             self._lbl_summary_placeholder.setVisible(True)
+            self.lbl_load_diagram.setPixmap(QtGui.QPixmap())
+            self.lbl_load_diagram.setText(
+                "Presione \"Analizar y verificar\" para ver aquí el diagrama "
+                "de cargas de producto."
+            )
             self.status.showMessage(
                 f"Modelo construido: {len(self.model.nodes)} nudos, "
                 f"{len(self.model.members)} elementos. Presione \"Analizar\"."
@@ -826,6 +1120,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 seismic=SeismicInputs(
                     soil_type=self.cb_soil.currentText(),
                     aa=self.sp_aa.value(), av=self.sp_av.value(),
+                    pl_promedio_ratio=self.sp_pl_promedio_ratio.value(),
                 ),
                 apply_el_factor_10=self.chk_el_relaxed.isChecked(),
             )
@@ -840,6 +1135,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._on_diagram_changed()
             self._populate_results_table()
             self._populate_summary_panel()
+            self._populate_load_diagram_panel()
             self.tabs.setCurrentWidget(self.results_table)
             n_fail = sum(1 for r in self.pipeline_result.member_rows.values() if r.ratio > 1.0)
             self.status.showMessage(
@@ -879,6 +1175,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table_fx.setRowCount(0)
         self._lbl_summary_placeholder.setVisible(True)
         self.txt_ai_output.clear()
+        self.lbl_load_diagram.setPixmap(QtGui.QPixmap())
+        self.lbl_load_diagram.setText(
+            "Construya el modelo y presione \"Analizar y verificar\" para "
+            "ver aquí el diagrama de cargas de producto."
+        )
 
         self.status.showMessage(
             "Modelo y resultados limpiados. Los valores del formulario se "
@@ -981,6 +1282,50 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             self._show_error("Error al exportar la memoria", exc)
 
+    def on_export_load_diagram(self) -> None:
+        if self.model is None or self.pipeline_result is None:
+            QtWidgets.QMessageBox.warning(
+                self, "Vortex", "Primero construya el modelo y ejecute el análisis."
+            )
+            return
+        dist = self.pipeline_result.load_distribution
+        if dist is None:
+            QtWidgets.QMessageBox.warning(
+                self, "Vortex", "El análisis no expone la distribución de cargas."
+            )
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Guardar diagrama de cargas", "cargas_producto.png", "Imagen PNG (*.png)"
+        )
+        if not path:
+            return
+        try:
+            from ..loads import plot_product_load_diagram
+            plot_product_load_diagram(self.model, dist, path=path)
+            self.status.showMessage(f"Diagrama de cargas exportado: {path}")
+            QtWidgets.QMessageBox.information(self, "Vortex", f"Diagrama exportado a:\n{path}")
+        except Exception as exc:
+            self._show_error("Error al exportar el diagrama de cargas", exc)
+
+    def on_open_diagrams_dialog(self, initial_tab: int = 0) -> None:
+        """Abre la ventana de diagramas (cargas, sismo, momento, axial,
+        cortante) y especificaciones de parales, a partir del último
+        análisis corrido ('Analizar y verificar'). `initial_tab` permite
+        abrir directamente en la pestaña elegida desde el desplegable de
+        la barra de herramientas."""
+        if self.model is None or self.pipeline_result is None or self.last_inputs is None:
+            QtWidgets.QMessageBox.warning(
+                self, "Vortex", "Primero construya el modelo y ejecute \"Analizar y verificar\"."
+            )
+            return
+        try:
+            dialog = DiagramsDialog(
+                self.model, self.pipeline_result, self.last_inputs, self, initial_tab=initial_tab,
+            )
+            dialog.exec()
+        except Exception as exc:
+            self._show_error("Error al abrir la ventana de diagramas", exc)
+
     def on_export_element_forces(self) -> None:
         if self.model is None or self.pipeline_result is None or self.last_inputs is None:
             QtWidgets.QMessageBox.warning(
@@ -1007,7 +1352,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # -------------------------- IA (Groq) ------------------------------
     def _on_ai_toolbar_clicked(self) -> None:
-        self.tabs.setCurrentWidget(self.ai_panel)
+        """Muestra/oculta el panel acoplable de Recomendaciones IA (si
+        estaba oculto lo muestra y lo trae al frente; si ya estaba visible
+        lo oculta) y, si hay un análisis corrido, dispara la consulta a la
+        IA de una vez. Se usa `isHidden()` (no `isVisible()`) para decidir
+        la dirección del toggle: `isVisible()` también depende de si la
+        ventana principal está mostrada, mientras que `isHidden()` refleja
+        únicamente si este panel en particular fue ocultado explícitamente."""
+        if not self.ai_dock.isHidden():
+            self.ai_dock.hide()
+            return
+        self.ai_dock.show()
+        self.ai_dock.raise_()
         if self.pipeline_result is not None:
             self.on_ai_recommend()
 

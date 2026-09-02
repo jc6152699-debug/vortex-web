@@ -59,7 +59,7 @@ class ReportData:
     member_rows_detail: List[Any] = field(default_factory=list)
     disclaimer_extra: str = ""
     # Texto de las recomendaciones del asesor de IA (Groq) ya consultado
-    # desde la GUI (ver `vortex.gui.app.get_recommendations_auto`), para
+    # desde la GUI (ver `vortex.ai.advisor` / `vortex.gui.app`), para
     # incluirlo como sección de la memoria (numeral 7). Vacío si el
     # usuario no consultó la IA antes de exportar — en ese caso la sección
     # se genera igual, con una nota indicándolo (ver `_add_ai_analysis`).

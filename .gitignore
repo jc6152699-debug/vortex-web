@@ -6,3 +6,6 @@ __pycache__/
 examples/*.csv
 .venv/
 venv/
+.groq_api_key
+.env
+vortex/ai/local_config.py

@@ -64,6 +64,7 @@ class Viewer3D(gl.GLViewWidget):
         self._member_items: Dict[int, gl.GLLinePlotItem] = {}
         self._diagram_items: list = []
         self._model: Optional[RackModel] = None
+        self._zoom_factor: float = 1.6   # factor de encuadre por defecto (distancia = span * factor)
 
     def clear_model(self) -> None:
         for item in self._member_items.values():
@@ -83,10 +84,27 @@ class Viewer3D(gl.GLViewWidget):
             self.addItem(item)
             self._member_items[mid] = item
 
+        self.fit_view()
+
+    def fit_view(self, zoom_factor: Optional[float] = None) -> None:
+        """
+        Ajusta el encuadre de la cámara al tamaño actual del estante
+        (distancia = mayor dimensión del modelo x `zoom_factor`), y lo
+        centra. Si no se da `zoom_factor`, reusa el último usado (por
+        defecto 1.6) — así el botón "Ajustar encuadre" del menú "Vista"
+        puede llamarse sin argumentos para simplemente re-centrar con el
+        zoom actual, o con un nuevo valor para acercar/alejar la vista.
+        Es un no-op silencioso si todavía no hay modelo cargado.
+        """
+        if self._model is None:
+            return
+        if zoom_factor is not None:
+            self._zoom_factor = zoom_factor
+        model = self._model
         (x0, y0, z0), (x1, y1, z1) = model.bounding_box()
         cx, cy, cz = (x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2
         span = max(x1 - x0, y1 - y0, z1 - z0, 1.0)
-        self.setCameraPosition(distance=span * 1.6)
+        self.setCameraPosition(distance=span * self._zoom_factor)
         self.opts["center"] = pg.Vector(cx, cy, cz)
 
     def color_by_ratio(self, ratios: Dict[int, float]) -> None:

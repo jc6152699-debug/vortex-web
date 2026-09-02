@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from ..geometry.model import MemberKind, RackModel
+from ..geometry.model import RackModel
 from ..units import G
 
 def dead_load_uprights(model: RackModel) -> Dict[int, float]:
@@ -24,27 +24,41 @@ def dead_load_uprights(model: RackModel) -> Dict[int, float]:
     return result
 
 
-def product_load_levels(
-    model: RackModel, pl_per_level_kn: Dict[int, float],
-) -> Dict[int, float]:
+def beam_udl_from_product_load(pl_per_level_kn: float, bay_length: float) -> float:
     """
-    Reparte la carga de producto (PL) de cada nivel entre las vigas de ese
-    nivel (frente y fondo), asumiendo que la estiba se apoya por igual en
-    ambas filas de vigas. `pl_per_level_kn` es la carga total de producto
-    (peso de la estiba/mercancía) por nivel y bahía, tal como se define en
-    la placa de capacidad (numeral 1.5.2).
+    Convierte la carga de producto (PL, kN por bahía y nivel, numeral
+    1.5.2) en carga uniformemente distribuida (kN/m) sobre CADA viga
+    porta-estibas de esa bahía y nivel.
 
-    Devuelve la carga por elemento (kN, uniformemente distribuida a lo
-    largo de cada viga).
+    Trayectoria de carga completa (verificada en
+    ``tests/test_load_path.py`` contra el reparto manual bahía → viga →
+    reacción → paral):
+
+    1. La estiba se apoya sobre el par de vigas de la bahía (frente +
+       fondo): cada viga recibe PL/2.
+    2. Cada viga reparte esa carga a sus dos apoyos (parales) por
+       equilibrio de la reacción de extremo.
+    3. Un paral EXTREMO (frame_index 0 o n_bays, sólo conectado a una
+       bahía) recibe la reacción de una sola viga por nivel; un paral
+       INTERIOR (conectado a dos bahías consecutivas) recibe las
+       reacciones de ambas — el doble de carga axial por nivel que un
+       paral extremo. Esto no se calcula aparte: emerge automáticamente
+       del modelo de pórtico espacial 3D continuo (un solo elemento
+       MemberLoad por viga, aplicado con esta función), porque cada
+       paral interior está conectado a las dos vigas adyacentes.
     """
-    beams = model.members_of_kind(MemberKind.BEAM)
-    result: Dict[int, float] = {}
-    for m in beams:
-        pl_level = pl_per_level_kn.get(m.level_index, 0.0)
-        # La estiba se apoya sobre el par de vigas (frente+fondo) de la
-        # bahía: cada viga recibe la mitad de la carga de esa bahía/nivel.
-        result[m.id] = pl_level / 2.0
-    return result
+    return (pl_per_level_kn / 2.0) / bay_length
+
+
+def beam_udl_from_live_load(ll_kn_m2: float, frame_depth: float) -> float:
+    """
+    Convierte la carga viva (LL, kN/m², numeral 2.1 — plataformas de
+    trabajo/pasillos, NO la de producto) en carga distribuida (kN/m)
+    sobre cada viga, con el mismo criterio de reparto que
+    `beam_udl_from_product_load`: ancho tributario = profundidad de
+    marco / 2 por viga (frente + fondo).
+    """
+    return ll_kn_m2 * frame_depth / 2.0
 
 
 def impact_load(pl_per_level_kn: Dict[int, float], factor: float = 0.25) -> Dict[int, float]:
