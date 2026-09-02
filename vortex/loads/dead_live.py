@@ -9,6 +9,28 @@ from typing import Dict, List
 from ..geometry.model import MemberKind, RackModel
 from ..units import G
 
+# NTC 5689 numeral 2.1 define LL ("carga viva distinta a la de las
+# estibas o productos almacenados en la estantería, por ejemplo cargas de
+# piso de las plataformas de trabajo") pero NO fija su valor: ese valor
+# viene del código de edificaciones aplicable — en Colombia, NSR-10
+# Título B ("Cargas"), Tabla B.4.2.1-1 ("Cargas vivas mínimas uniformemente
+# repartidas"). Estos son valores de referencia de esa tabla para las
+# ocupaciones más relevantes a una estantería industrial (plataformas de
+# trabajo/pasillos de acceso sobre el nivel del piso); SÓLO aplican si el
+# proyecto realmente tiene una plataforma o entrepiso transitable — la
+# mayoría de estanterías selectivas sin entrepiso NO tienen esta carga
+# (LL=0). Verifique siempre contra la edición vigente de NSR-10 Título B
+# antes de un diseño definitivo; esta lista no reemplaza la tabla completa
+# de ocupaciones de la norma.
+LIVE_LOAD_PRESETS_KN_M2: Dict[str, float] = {
+    "Sin plataforma de trabajo (LL = 0)": 0.0,
+    "Bodega — almacenamiento liviano": 6.0,
+    "Bodega — almacenamiento pesado": 12.0,
+    "Pasillos / escaleras de acceso": 4.8,
+    "Oficinas": 2.0,
+    "Cubierta sin acceso (solo mantenimiento)": 0.5,
+}
+
 
 def dead_load_uprights(model: RackModel) -> Dict[int, float]:
     """

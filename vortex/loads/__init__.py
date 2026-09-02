@@ -1,5 +1,7 @@
 from . import seismic
-from .dead_live import dead_load_uprights, product_load_levels, impact_load
+from .dead_live import (
+    dead_load_uprights, product_load_levels, impact_load, LIVE_LOAD_PRESETS_KN_M2,
+)
 from .combinations import (
     LoadCase,
     Combination,
@@ -13,6 +15,7 @@ __all__ = [
     "dead_load_uprights",
     "product_load_levels",
     "impact_load",
+    "LIVE_LOAD_PRESETS_KN_M2",
     "LoadCase",
     "Combination",
     "asd_combinations",

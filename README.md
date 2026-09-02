@@ -179,6 +179,23 @@ Arriostramiento, Cargas, Sismo):
    ya la incluían (`combinations.py` ya traía el factor de LL, simplemente
    nunca recibía una fuerza distinta de cero) — sin cambiar ninguna
    fórmula normativa ya validada.
+
+   **Cálculo automático de LL:** NTC 5689 define LL como "carga viva
+   *distinta* a la de las estibas o productos almacenados... por ejemplo
+   cargas de piso de las plataformas de trabajo" pero no fija su valor —
+   ese valor viene del código de edificaciones aplicable (NSR-10 Título
+   B, Tabla B.4.2.1-1). El desplegable **"Origen de la carga viva
+   (LL)"** ofrece las ocupaciones más relevantes a una estantería
+   industrial (bodega liviana/pesada, pasillos, oficinas, cubierta sin
+   acceso) y autocompleta el campo — igual que Aa/Av se autocompletan al
+   elegir la ciudad. Solo aplica si el proyecto realmente tiene una
+   plataforma o entrepiso transitable (la mayoría de estanterías
+   selectivas sin entrepiso NO la tienen: la opción por defecto es
+   "Sin plataforma de trabajo", LL=0). Son valores de referencia — la
+   opción **"Manual"** deja escribir un valor propio, y en cualquier
+   caso deben verificarse contra la edición vigente de NSR-10 Título B
+   antes de un diseño definitivo (`vortex/loads/dead_live.py`,
+   `LIVE_LOAD_PRESETS_KN_M2`).
 6. **Recomendaciones IA** (pestaña junto a "Resultados") → envía un
    resumen numérico del chequeo (elementos más críticos, parámetros
    sísmicos, conteo de fallas) a un modelo LLM a través de la API de
