@@ -184,6 +184,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.tabs.addTab(self.results_table, "📋 Resultados")
 
+        self.summary_panel = self._build_summary_panel()
+        self.tabs.addTab(self.summary_panel, "📊 Cargas y sismo")
+
         self.ai_panel = self._build_ai_panel()
         self.tabs.addTab(self.ai_panel, "🤖 Recomendaciones IA")
 
@@ -193,6 +196,111 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.status = self.statusBar()
         self.status.showMessage("Defina la geometría y presione \"Construir modelo\".")
+
+    def _build_summary_panel(self) -> QtWidgets.QWidget:
+        """
+        Resumen de cargas y sismo, estilo la hoja "1.Datos_Entrada" /
+        "2.Cargas_Sismo" de la memoria de cálculo en Excel de referencia:
+        carga de producto y peso propio (total y por nivel), coeficientes
+        sísmicos Ca/Cv/Cs y cortante basal V por dirección, y la
+        distribución vertical de fuerzas Fx por nivel. Se calcula con el
+        mismo motor ya validado (`vortex.loads.seismic`); este panel sólo
+        hace visibles esos resultados intermedios, no repite el cálculo.
+        """
+        panel = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(panel)
+
+        loads_box = QtWidgets.QGroupBox("⬇ Cargas (calculado)")
+        loads_form = QtWidgets.QFormLayout(loads_box)
+        self.lbl_sum_pl_level = QtWidgets.QLabel("—")
+        self.lbl_sum_pl_total = QtWidgets.QLabel("—")
+        self.lbl_sum_dl_level = QtWidgets.QLabel("—")
+        self.lbl_sum_dl_total = QtWidgets.QLabel("—")
+        loads_form.addRow("Carga de producto (PL) por nivel-bahía", self.lbl_sum_pl_level)
+        loads_form.addRow("Carga de producto (PL) total", self.lbl_sum_pl_total)
+        loads_form.addRow("Peso propio (DL) tributario por nivel", self.lbl_sum_dl_level)
+        loads_form.addRow("Peso propio (DL) total (modelo 3D real)", self.lbl_sum_dl_total)
+        layout.addWidget(loads_box)
+
+        seis_row = QtWidgets.QHBoxLayout()
+        self.seis_trans_box, self._seis_trans_labels = self._build_seismic_summary_box(
+            "〰 Sismo transversal (marcos, R=4)"
+        )
+        self.seis_long_box, self._seis_long_labels = self._build_seismic_summary_box(
+            "〰 Sismo longitudinal (vigas, R=6)"
+        )
+        seis_row.addWidget(self.seis_trans_box)
+        seis_row.addWidget(self.seis_long_box)
+        layout.addLayout(seis_row)
+
+        dist_box = QtWidgets.QGroupBox("📶 Distribución de fuerzas horizontales por nivel")
+        dist_layout = QtWidgets.QVBoxLayout(dist_box)
+        self.table_fx = QtWidgets.QTableWidget(0, 4)
+        self.table_fx.setHorizontalHeaderLabels(
+            ["Nivel", "Altura desde piso (m)", "Fx transversal (kN)", "Fx longitudinal (kN)"]
+        )
+        self.table_fx.horizontalHeader().setStretchLastSection(True)
+        dist_layout.addWidget(self.table_fx)
+        layout.addWidget(dist_box, 1)
+
+        placeholder = QtWidgets.QLabel(
+            "Ejecute \"Analizar y verificar\" para calcular este resumen."
+        )
+        placeholder.setStyleSheet("color: #96a1ad;")
+        layout.addWidget(placeholder)
+        self._lbl_summary_placeholder = placeholder
+
+        return panel
+
+    def _build_seismic_summary_box(self, title: str):
+        box = QtWidgets.QGroupBox(title)
+        form = QtWidgets.QFormLayout(box)
+        labels = {}
+        for key, caption in (
+            ("ca", "Ca"), ("cv", "Cv"), ("r", "R"), ("ip", "Ip"),
+            ("plrf", "PLRF"), ("ws", "Ws (peso sísmico efectivo)"),
+            ("cs", "Cs"), ("v", "V (cortante basal)"),
+        ):
+            lbl = QtWidgets.QLabel("—")
+            form.addRow(caption, lbl)
+            labels[key] = lbl
+        return box, labels
+
+    def _populate_summary_panel(self) -> None:
+        result = self.pipeline_result
+        model = self.model
+        if result is None or model is None:
+            return
+        self._lbl_summary_placeholder.setVisible(False)
+
+        self.lbl_sum_pl_level.setText(f"{self.sp_pl.value():.2f} kgf  ({kgf_to_kn(self.sp_pl.value()):.3f} kN)")
+        self.lbl_sum_pl_total.setText(f"{result.pl_total_kn:.2f} kN")
+        self.lbl_sum_dl_level.setText(f"{result.dl_per_level_kn:.3f} kN")
+        self.lbl_sum_dl_total.setText(f"{result.dl_total_kn:.3f} kN")
+
+        for seis, labels in (
+            (result.seismic_transversal, self._seis_trans_labels),
+            (result.seismic_longitudinal, self._seis_long_labels),
+        ):
+            labels["ca"].setText(f"{seis.ca:.4f}")
+            labels["cv"].setText(f"{seis.cv:.4f}")
+            labels["r"].setText(f"{seis.r:.2f}")
+            labels["ip"].setText(f"{seis.ip:.2f}")
+            labels["plrf"].setText(f"{seis.plrf:.3f}")
+            labels["ws"].setText(f"{seis.ws:.2f} kN")
+            labels["cs"].setText(f"{seis.cs:.5f}")
+            labels["v"].setText(f"{seis.v_base:.2f} kN")
+
+        levels = sorted(result.seismic_transversal.fx_by_level.keys())
+        self.table_fx.setRowCount(len(levels))
+        for i, lv in enumerate(levels):
+            elevation = model.level_elevations[lv]
+            fx_t = result.seismic_transversal.fx_by_level.get(lv, 0.0)
+            fx_l = result.seismic_longitudinal.fx_by_level.get(lv, 0.0)
+            vals = [str(lv), f"{elevation:.2f}", f"{fx_t:.3f}", f"{fx_l:.3f}"]
+            for j, v in enumerate(vals):
+                self.table_fx.setItem(i, j, QtWidgets.QTableWidgetItem(v))
+        self.table_fx.resizeColumnsToContents()
 
     def _build_ai_panel(self) -> QtWidgets.QWidget:
         """
@@ -431,6 +539,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.chk_show_diagram.setChecked(False)
             self.chk_show_diagram.setEnabled(False)
             self.results_table.setRowCount(0)
+            self.table_fx.setRowCount(0)
+            self._lbl_summary_placeholder.setVisible(True)
             self.status.showMessage(
                 f"Modelo construido: {len(self.model.nodes)} nudos, "
                 f"{len(self.model.members)} elementos. Presione \"Analizar\"."
@@ -462,6 +572,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._apply_coloring()
             self._on_diagram_changed()
             self._populate_results_table()
+            self._populate_summary_panel()
             self.tabs.setCurrentWidget(self.results_table)
             n_fail = sum(1 for r in self.pipeline_result.member_rows.values() if r.ratio > 1.0)
             self.status.showMessage(

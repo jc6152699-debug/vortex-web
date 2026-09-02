@@ -71,6 +71,9 @@ class PipelineResult:
     seismic_longitudinal: sm.SeismicResult
     combos: List[Combination]
     member_rows: Dict[int, MemberResultRow] = field(default_factory=dict)
+    dl_total_kn: float = 0.0     # kN, peso propio total (todos los parales y vigas)
+    dl_per_level_kn: float = 0.0   # kN, peso propio promedio tributario por nivel
+    pl_total_kn: float = 0.0        # kN, carga de producto total (todas las bahías x niveles)
 
     def max_ratio(self) -> float:
         return max((r.ratio for r in self.member_rows.values()), default=0.0)
@@ -144,6 +147,7 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
     result = PipelineResult(
         patterns=patterns, seismic_transversal=seis_trans, seismic_longitudinal=seis_long,
         combos=combos,
+        dl_total_kn=dl_total, dl_per_level_kn=dl_per_level, pl_total_kn=pl_total,
     )
 
     w_pl_beam = (inputs.pl_per_level_kn / 2.0) / model.bay_length

@@ -148,7 +148,17 @@ Arriostramiento, Cargas, Sismo):
    colorea cada elemento según su relación demanda/capacidad (verde =
    holgado, amarillo = ajustado ≥0.9, rojo = no cumple >1.0).
 4. **Exportar memoria de cálculo** → guarda el reporte `.docx`.
-5. **Recomendaciones IA** (pestaña junto a "Resultados") → envía un
+5. **Cargas y sismo** (pestaña junto a "Resultados") → resumen calculado
+   de la carga de producto (PL, por nivel y total), el peso propio real
+   del modelo 3D (DL, por nivel y total), y los coeficientes sísmicos
+   Ca/Cv/R/Ip/PLRF/Ws/Cs/V por dirección (transversal y longitudinal) más
+   la distribución vertical de fuerzas Fx por nivel — el mismo tipo de
+   resumen de las hojas "1.Datos_Entrada"/"2.Cargas_Sismo" de una memoria
+   de cálculo en Excel, calculado por el motor ya validado de Vortex (sin
+   una hoja de cálculo aparte). La ciudad (NSR-10 Tabla A.2.2.1) sigue
+   autocompletando Aa/Av al seleccionarla, para las 32 ciudades de la
+   tabla.
+6. **Recomendaciones IA** (pestaña junto a "Resultados") → envía un
    resumen numérico del chequeo (elementos más críticos, parámetros
    sísmicos, conteo de fallas) a un modelo LLM a través de la API de
    [Groq](https://console.groq.com/keys) y muestra recomendaciones de
