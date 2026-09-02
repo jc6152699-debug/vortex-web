@@ -95,9 +95,12 @@ def test_tools_dropdown_build_action_runs_handler(qapp):
 
 
 def test_tools_dropdown_menu_has_view_controls(qapp):
-    """Los controles de "Vista" (líneas de fuerzas, encuadre) viven dentro
-    del menú "Más herramientas" como un panel embebido (QWidgetAction),
-    no en un botón desplegable propio."""
+    """El control de "Vista" (encuadre del visor 3D) vive dentro del menú
+    "Más herramientas" como un panel embebido (QWidgetAction), no en un
+    botón desplegable propio. La opción "Líneas de fuerzas" (overlay de
+    P/M2/M3/V2/V3 en el visor 3D) se retiró a pedido explícito del
+    usuario — los diagramas de momento/axial/cortante siguen disponibles
+    en "📐 Diagramas y especificaciones"."""
     from vortex.gui.app import MainWindow
     from PySide6 import QtWidgets
 
@@ -108,14 +111,15 @@ def test_tools_dropdown_menu_has_view_controls(qapp):
     panel = widget_actions[0].defaultWidget()
     assert panel is not None
 
-    # Los controles existen y son los mismos objetos que usa el resto de
-    # la clase (no una copia aparte).
-    assert isinstance(win.chk_show_diagram, QtWidgets.QCheckBox)
-    assert isinstance(win.cb_diagram_pattern, QtWidgets.QComboBox)
-    assert isinstance(win.cb_diagram_component, QtWidgets.QComboBox)
-    assert isinstance(win.sp_diagram_scale, QtWidgets.QDoubleSpinBox)
+    # El control existe y es el mismo objeto que usa el resto de la clase
+    # (no una copia aparte).
     assert isinstance(win.sp_view_zoom, QtWidgets.QDoubleSpinBox)
-    assert win.chk_show_diagram.parentWidget() is panel or win.chk_show_diagram in panel.findChildren(QtWidgets.QCheckBox)
+    assert win.sp_view_zoom.parentWidget() is panel or win.sp_view_zoom in panel.findChildren(QtWidgets.QDoubleSpinBox)
+
+    assert not hasattr(win, "chk_show_diagram")
+    assert not hasattr(win, "cb_diagram_pattern")
+    assert not hasattr(win, "cb_diagram_component")
+    assert not hasattr(win, "sp_diagram_scale")
 
 
 def test_toolbar_remaining_actions_after_dropdown(qapp):

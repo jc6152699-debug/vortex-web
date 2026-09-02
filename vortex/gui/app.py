@@ -216,57 +216,20 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_view_menu_panel(self) -> QtWidgets.QWidget:
         """
         Panel embebido dentro del desplegable "🗂 Más herramientas" de la
-        barra de herramientas: controles de "Líneas de fuerzas" (antes
-        fijos debajo del visor 3D) + el control de "Encuadre" (zoom/ajuste
-        de la vista al tamaño del estante). Los widgets creados aquí
-        (`self.chk_show_diagram`, etc.) son los MISMOS objetos que usa el
-        resto de la clase (`_on_diagram_changed`, `on_build_model`, ...) —
-        sólo cambia dónde viven visualmente.
+        barra de herramientas: control de "Encuadre" (zoom/ajuste de la
+        vista al tamaño del estante). El control creado aquí
+        (`self.sp_view_zoom`) es el MISMO objeto que usa el resto de la
+        clase — sólo cambia dónde vive visualmente.
+
+        (La opción "Líneas de fuerzas" — overlay de P/M2/M3/V2/V3 sobre el
+        visor 3D — se retiró a pedido explícito del usuario; los
+        diagramas de momento/axial/cortante siguen disponibles en el
+        desplegable "📐 Diagramas y especificaciones".)
         """
         panel = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(panel)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(6)
-
-        lbl_diagram = QtWidgets.QLabel("Líneas de fuerzas (visor 3D)")
-        lbl_diagram.setStyleSheet("font-weight: 600;")
-        layout.addWidget(lbl_diagram)
-
-        self.chk_show_diagram = QtWidgets.QCheckBox("Mostrar")
-        self.chk_show_diagram.setEnabled(False)
-        self.chk_show_diagram.toggled.connect(self._on_diagram_changed)
-        layout.addWidget(self.chk_show_diagram)
-
-        row1 = QtWidgets.QHBoxLayout()
-        row1.addWidget(QtWidgets.QLabel("Patrón"))
-        self.cb_diagram_pattern = QtWidgets.QComboBox()
-        self.cb_diagram_pattern.addItems(["DL", "PL", "LL", "EL_X", "EL_Y"])
-        self.cb_diagram_pattern.currentIndexChanged.connect(self._on_diagram_changed)
-        row1.addWidget(self.cb_diagram_pattern, 1)
-        layout.addLayout(row1)
-
-        row2 = QtWidgets.QHBoxLayout()
-        row2.addWidget(QtWidgets.QLabel("Componente"))
-        self.cb_diagram_component = QtWidgets.QComboBox()
-        self.cb_diagram_component.addItems(["P", "M2", "M3", "V2", "V3"])
-        self.cb_diagram_component.setCurrentText("M2")
-        self.cb_diagram_component.currentIndexChanged.connect(self._on_diagram_changed)
-        row2.addWidget(self.cb_diagram_component, 1)
-        layout.addLayout(row2)
-
-        row3 = QtWidgets.QHBoxLayout()
-        row3.addWidget(QtWidgets.QLabel("Escala"))
-        self.sp_diagram_scale = QtWidgets.QDoubleSpinBox()
-        self.sp_diagram_scale.setRange(0.1, 10.0)
-        self.sp_diagram_scale.setSingleStep(0.1)
-        self.sp_diagram_scale.setValue(1.0)
-        self.sp_diagram_scale.valueChanged.connect(self._on_diagram_changed)
-        row3.addWidget(self.sp_diagram_scale, 1)
-        layout.addLayout(row3)
-
-        line = QtWidgets.QFrame()
-        line.setFrameShape(QtWidgets.QFrame.HLine)
-        layout.addWidget(line)
 
         lbl_frame = QtWidgets.QLabel("Encuadre del estante (zoom del visor 3D)")
         lbl_frame.setStyleSheet("font-weight: 600;")
@@ -333,14 +296,12 @@ class MainWindow(QtWidgets.QMainWindow):
         legend_row.addWidget(self.legend, 1)
         viewer_layout.addLayout(legend_row)
 
-        # NOTA: los controles de "Líneas de fuerzas" (patrón/componente/
-        # escala) y de encuadre del visor 3D ya NO viven aquí debajo del
-        # visor — se movieron dentro del menú desplegable "🗂 Más
+        # NOTA: el control de encuadre del visor 3D ya NO vive aquí debajo
+        # del visor — se movió dentro del menú desplegable "🗂 Más
         # herramientas" de la barra de herramientas (ver `_build_toolbar`),
-        # para no ocupar espacio permanente con controles de uso ocasional
-        # ni un botón de barra aparte. Los widgets (`self.chk_show_diagram`,
-        # etc.) se siguen creando en `_build_view_menu_panel` y funcionan
-        # exactamente igual.
+        # para no ocupar espacio permanente con un control de uso
+        # ocasional ni un botón de barra aparte. Se sigue creando en
+        # `_build_view_menu_panel` y funciona exactamente igual.
 
         viewer_container.setMinimumHeight(160)
         right.addWidget(viewer_container)
@@ -980,8 +941,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.pipeline_result = None
             self.viewer.show_model(self.model)
             self.cb_color_by.setEnabled(False)
-            self.chk_show_diagram.setChecked(False)
-            self.chk_show_diagram.setEnabled(False)
             self.results_table.setRowCount(0)
             self.table_fx.setRowCount(0)
             self._lbl_summary_placeholder.setVisible(True)
@@ -1019,9 +978,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QApplication.restoreOverrideCursor()
 
             self.cb_color_by.setEnabled(True)
-            self.chk_show_diagram.setEnabled(True)
             self._apply_coloring()
-            self._on_diagram_changed()
             self._populate_results_table()
             self._populate_summary_panel()
             self._populate_load_diagram_panel()
@@ -1055,10 +1012,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.last_inputs = None
 
         self.viewer.clear_model()
-        self.viewer.clear_force_diagram()
         self.cb_color_by.setEnabled(False)
-        self.chk_show_diagram.setChecked(False)
-        self.chk_show_diagram.setEnabled(False)
 
         self.results_table.setRowCount(0)
         self.table_fx.setRowCount(0)
@@ -1078,21 +1032,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_color_by_changed(self) -> None:
         if self.pipeline_result is not None:
             self._apply_coloring()
-
-    def _on_diagram_changed(self) -> None:
-        if self.pipeline_result is None:
-            return
-        if not self.chk_show_diagram.isChecked():
-            self.viewer.clear_force_diagram()
-            return
-        pattern = self.cb_diagram_pattern.currentText()
-        component = self.cb_diagram_component.currentText()
-        analysis = self.pipeline_result.patterns.get(pattern)
-        if analysis is None:
-            return
-        self.viewer.show_force_diagram(
-            self.model, analysis, component, scale=self.sp_diagram_scale.value(),
-        )
 
     def _apply_coloring(self) -> None:
         if self.pipeline_result is None:
