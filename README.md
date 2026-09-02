@@ -72,11 +72,17 @@ rectangular simple idealizada a partir de las cotas exteriores de un
 plano de fabricación; el perfil real probablemente incluye un pliegue o
 refuerzo interior (visible como un escalón en el plano) que le da un
 módulo de sección mayor al calculado aquí. Por eso el ejemplo reporta
-ratios de flexión altos en las vigas bajo carga real — es una limitación
-de la sección de catálogo, no del motor de cargas ni del análisis (la
-carga distribuida calculada, ~4.8 kN/m, coincide con el valor real de
-SAP2000 de la memoria, ~4.92 kN/m). Para un diseño definitivo, reemplazar
-`Section.Sy` por el valor certificado del fabricante.
+ratios de flexión de hasta **~1.44** en las vigas bajo carga real (antes
+de una corrección de catálogo aplicada en 2026-09, este ratio llegaba a
+~2.9 porque `rectangular_tube_section` tenía los ejes fuerte/débil
+intercambiados — `Iy`/`Sy`, usados para el chequeo de flexión por
+gravedad, recibían por error el módulo del eje débil de 60mm en vez del
+eje fuerte de 160mm; ya corregido y cubierto por `tests/test_design.py`).
+El ~1.44 restante es una limitación de la sección de catálogo, no del
+motor de cargas ni del análisis (la carga distribuida calculada, ~4.8
+kN/m, coincide con el valor real de SAP2000 de la memoria, ~4.92 kN/m).
+Para un diseño definitivo, reemplazar `Section.Sy` por el valor
+certificado del fabricante.
 
 **Por qué los valores de Vortex se acercan pero no coinciden exactamente
 con una memoria de SAP2000 existente:** al examinar la tabla "Frame

@@ -182,10 +182,14 @@ def rectangular_tube_section(
     h = H - t
     b = B - t
     A = 2 * t * (h + b)
-    Iz = (B * H ** 3 - (B - 2 * t) * (H - 2 * t) ** 3) / 12.0   # flexión alrededor de z (fuerte, si H>B)
-    Iy = (H * B ** 3 - (H - 2 * t) * (B - 2 * t) ** 3) / 12.0    # flexión alrededor de y
-    Sz = Iz / (H / 2.0)
-    Sy = Iy / (B / 2.0)
+    # Convención del proyecto: Iy = integral(z^2 dA) -> eje fuerte cuando la
+    # dimensión "profundidad" (H) se extiende en z (igual que en
+    # thin_wall_open_section, usada para los parales tipo canal); Iz =
+    # integral(y^2 dA) -> eje débil, extendido en y (dimensión B, ancho).
+    Iy = (B * H ** 3 - (B - 2 * t) * (H - 2 * t) ** 3) / 12.0   # eje fuerte (si H>B)
+    Iz = (H * B ** 3 - (H - 2 * t) * (B - 2 * t) ** 3) / 12.0   # eje débil
+    Sy = Iy / (H / 2.0)
+    Sz = Iz / (B / 2.0)
     ry = (Iy / A) ** 0.5
     rz = (Iz / A) ** 0.5
     # Constante de torsión de Bredt para tubo rectangular de pared delgada
