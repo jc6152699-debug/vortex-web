@@ -18,7 +18,7 @@ from ..loads.dead_live import dead_load_uprights
 from ..loads.combinations import lrfd_combinations, LoadCase, Combination
 from ..loads import seismic as sm
 from ..design.upright_cfs import check_upright_compression_bending, UprightCheckResult
-from ..design.beam import check_beam, check_deflection, BeamCheckResult
+from ..design.beam import check_beam, check_deflection, BeamCheckResult, beam_moment_at, beam_shear_at
 from .solve import analyze, AnalysisResult, MemberLoad, NodalLoad
 
 
@@ -216,3 +216,147 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
         )
 
     return result
+
+
+@dataclass
+class ElementForceRow:
+    """Una fila de la tabla 'Element Forces - Frames', en el mismo formato
+    de columnas que usa SAP2000 — para chequeo cruzado directo contra una
+    memoria de cálculo existente."""
+    item: int
+    frame: int         # id del elemento (equivalente a "Frame" en SAP2000)
+    label: str
+    output_case: str
+    station_m: float
+    P: float
+    M3: float
+    V2: float
+    M2: float
+    V3: float
+
+
+def _sap_style_combo_label(combo: Combination) -> str:
+    """Etiqueta compacta 'DL+EL+PL' (sólo términos con factor no nulo, sin
+    LL/SL/RL/Imp), igual a la convención de nombres de combinación que usa
+    SAP2000 en la columna OutputCase del proyecto de referencia (p.ej.
+    '1.4DL+1.2PL', '1.2DL+1.5EL+0.85PL')."""
+    terms = []
+    for lc in (LoadCase.DL, LoadCase.EL, LoadCase.PL):
+        f = combo.factors.get(lc, 0.0)
+        if f:
+            terms.append(f"{f:g}{lc.value}")
+    return "+".join(terms)
+
+
+def element_forces_table(
+    model: RackModel,
+    result: PipelineResult,
+    inputs: PipelineInputs,
+    el_pattern: str = "EL_X",
+    n_stations: int = 3,
+    kinds: tuple = (MemberKind.UPRIGHT, MemberKind.BEAM),
+) -> List[ElementForceRow]:
+    """
+    Reconstruye la tabla 'TABLE: Element Forces - Frames' (columnas
+    Frame, OutputCase, P, M3, V2, M2, V3) a partir de los patrones de
+    carga ya resueltos en `result.patterns`, para las tres combinaciones
+    reales del proyecto de referencia (1.4DL+1.2PL, 1.2DL+1.4PL,
+    1.2DL+1.5EL+0.85PL), muestreada en `n_stations` estaciones por
+    elemento (3 por defecto, como en la tabla original: extremo i, medio,
+    extremo j).
+
+    M2/V3 de vigas se calculan con la fórmula exacta de equilibrio bajo
+    carga uniforme (`design.beam.beam_moment_at`/`beam_shear_at`); el
+    resto de componentes (P, M3, V2 siempre; M2/V3 de parales y
+    diagonales) se interpolan linealmente entre los extremos, lo cual es
+    EXACTO en este modelo: el peso propio (única carga distribuida sobre
+    parales) actúa en la dirección global Z, que para un paral vertical
+    es puramente axial (sin componente transversal), y ningún patrón de
+    carga aplica carga distribuida en el eje local y de ningún elemento.
+    """
+    dl_by_member = dead_load_uprights(model)
+    w_pl_beam = (inputs.pl_per_level_kn / 2.0) / model.bay_length
+
+    combo_ids = ("1", "2", "5")
+    seen_ids = set()
+    combos = []
+    for c in result.combos:
+        if c.id in combo_ids and c.id not in seen_ids:
+            combos.append(c)
+            seen_ids.add(c.id)  # una sola variante por id (LL=SL=RL=0 en este proyecto)
+
+    rows: List[ElementForceRow] = []
+    item = 1
+    for member in model.members.values():
+        if member.kind not in kinds:
+            continue
+        L = model.member_length(member)
+        w_dl = dl_by_member.get(member.id, 0.0) / L if L > 1e-9 else 0.0
+
+        for combo in combos:
+            f_dl = combo.factors.get(LoadCase.DL, 0.0)
+            f_pl = combo.factors.get(LoadCase.PL, 0.0)
+            f_el = combo.factors.get(LoadCase.EL, 0.0)
+
+            mf_dl = result.patterns["DL"].member_forces[member.id]
+            mf_pl = result.patterns["PL"].member_forces[member.id]
+            mf_el = result.patterns[el_pattern].member_forces[member.id] if f_el else None
+
+            def combine(attr_i: str, attr_j: str):
+                vi = f_dl * getattr(mf_dl, attr_i) + f_pl * getattr(mf_pl, attr_i)
+                vj = f_dl * getattr(mf_dl, attr_j) + f_pl * getattr(mf_pl, attr_j)
+                if mf_el is not None:
+                    vi += f_el * getattr(mf_el, attr_i)
+                    vj += f_el * getattr(mf_el, attr_j)
+                return vi, vj
+
+            P_i, P_j = combine("P_i", "P_j")
+            M3_i, M3_j = combine("M3_i", "M3_j")
+            V2_i, V2_j = combine("V2_i", "V2_j")
+            M2_i, M2_j = combine("M2_i", "M2_j")
+            V3_i, V3_j = combine("V3_i", "V3_j")
+
+            w_z_combo = (f_dl * w_dl + f_pl * w_pl_beam) if member.kind == MemberKind.BEAM else 0.0
+
+            MF = type(mf_dl)
+            mf_combo = MF(
+                member_id=member.id,
+                P_i=P_i, V2_i=V2_i, V3_i=V3_i, T_i=0.0, M2_i=M2_i, M3_i=M3_i,
+                P_j=P_j, V2_j=V2_j, V3_j=V3_j, T_j=0.0, M2_j=M2_j, M3_j=M3_j,
+                r_int_z=(0.0, 0.0), r_int_y=(0.0, 0.0),
+            )
+
+            for k in range(n_stations):
+                x = L * k / (n_stations - 1) if n_stations > 1 else 0.0
+                t = x / L if L > 1e-9 else 0.0
+                P = P_i + (P_j - P_i) * t
+                M3 = M3_i + (M3_j - M3_i) * t
+                V2 = V2_i + (V2_j - V2_i) * t
+                if member.kind == MemberKind.BEAM:
+                    M2 = beam_moment_at(mf_combo, w_z_combo, L, x)
+                    V3 = beam_shear_at(mf_combo, w_z_combo, x)
+                else:
+                    M2 = M2_i + (M2_j - M2_i) * t
+                    V3 = V3_i + (V3_j - V3_i) * t
+                rows.append(ElementForceRow(
+                    item=item, frame=member.id, label=member.label,
+                    output_case=_sap_style_combo_label(combo), station_m=x,
+                    P=P, M3=M3, V2=V2, M2=M2, V3=V3,
+                ))
+                item += 1
+    return rows
+
+
+def write_element_forces_csv(rows: List[ElementForceRow], path: str) -> str:
+    """Guarda `element_forces_table` en un .csv con las mismas columnas
+    (Frame, OutputCase, P, M3, V2, M2, V3) que la tabla 'Element Forces -
+    Frames' exportada de SAP2000, para diff directo en Excel."""
+    import csv
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["ITEM", "Frame", "Label", "OutputCase", "Station[m]",
+                          "P[KN]", "M3[KN-m]", "V2[KN]", "M2[KN-m]", "V3[KN]"])
+        for r in rows:
+            writer.writerow([r.item, r.frame, r.label, r.output_case, f"{r.station_m:.4f}",
+                              f"{r.P:.4f}", f"{r.M3:.4f}", f"{r.V2:.4f}", f"{r.M2:.4f}", f"{r.V3:.4f}"])
+    return path

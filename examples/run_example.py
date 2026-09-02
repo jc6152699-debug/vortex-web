@@ -26,7 +26,10 @@ from vortex.geometry import (
 )
 from vortex.geometry.model import MemberKind
 from vortex.sections import default_catalog
-from vortex.analysis import PipelineInputs, SeismicInputs, run_full_check
+from vortex.analysis import (
+    PipelineInputs, SeismicInputs, run_full_check,
+    element_forces_table, write_element_forces_csv,
+)
 from vortex.report import ProjectInfo, ReportData, generate_memoria
 from vortex.units import kgf_to_kn
 
@@ -157,6 +160,16 @@ def main() -> None:
     out_path = os.path.join(os.path.dirname(__file__), "memoria_ejemplo.docx")
     generate_memoria(report_data, out_path)
     print(f"\nMemoria de cálculo generada: {out_path}")
+
+    # ---------------- Chequeo cruzado (Element Forces - Frames) --------
+    # Fuerzas P/M3/V2/M2/V3 por elemento, por estación y por combinación
+    # real del proyecto (1.4DL+1.2PL, 1.2DL+1.4PL, 1.2DL+1.5EL+0.85PL),
+    # exportadas en el mismo formato que la tabla "Element Forces -
+    # Frames" de SAP2000, para comparar fila por fila contra la memoria.
+    forces_rows = element_forces_table(model, result, inputs, el_pattern="EL_X")
+    csv_path = os.path.join(os.path.dirname(__file__), "element_forces.csv")
+    write_element_forces_csv(forces_rows, csv_path)
+    print(f"Tabla 'Element Forces - Frames' exportada para chequeo cruzado: {csv_path}")
 
 
 if __name__ == "__main__":

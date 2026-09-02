@@ -22,7 +22,10 @@ from ..geometry import (
 from ..geometry.model import RackModel, SectionKind
 from ..sections.catalog import default_catalog
 from ..loads.seismic import AA_AV_BY_CITY
-from ..analysis import PipelineInputs, PipelineResult, SeismicInputs, run_full_check
+from ..analysis import (
+    PipelineInputs, PipelineResult, SeismicInputs, run_full_check,
+    element_forces_table, write_element_forces_csv,
+)
 from ..report import ProjectInfo, ReportData, generate_memoria
 from ..units import kgf_to_kn
 from .viewer3d import Viewer3D
@@ -41,6 +44,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.catalog = default_catalog()
         self.model: Optional[RackModel] = None
         self.pipeline_result: Optional[PipelineResult] = None
+        self.last_inputs: Optional[PipelineInputs] = None
 
         self._build_ui()
 
@@ -221,9 +225,14 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_analyze.clicked.connect(self.on_analyze)
         btn_export = QtWidgets.QPushButton("3. Exportar memoria de cálculo (.docx)")
         btn_export.clicked.connect(self.on_export)
+        btn_export_forces = QtWidgets.QPushButton(
+            "Exportar tabla de fuerzas por elemento (.csv, chequeo cruzado)"
+        )
+        btn_export_forces.clicked.connect(self.on_export_element_forces)
         layout.addWidget(btn_build)
         layout.addWidget(btn_analyze)
         layout.addWidget(btn_export)
+        layout.addWidget(btn_export_forces)
         layout.addStretch(1)
 
         disclaimer = QtWidgets.QLabel(
@@ -335,6 +344,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 ),
                 apply_el_factor_10=self.chk_el_relaxed.isChecked(),
             )
+            self.last_inputs = inputs
             QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
             self.pipeline_result = run_full_check(self.model, inputs)
             QtWidgets.QApplication.restoreOverrideCursor()
@@ -445,6 +455,30 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "Vortex", f"Memoria exportada a:\n{path}")
         except Exception as exc:
             self._show_error("Error al exportar la memoria", exc)
+
+    def on_export_element_forces(self) -> None:
+        if self.model is None or self.pipeline_result is None or self.last_inputs is None:
+            QtWidgets.QMessageBox.warning(
+                self, "Vortex", "Primero construya el modelo y ejecute el análisis."
+            )
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Guardar tabla de fuerzas por elemento", "element_forces.csv", "CSV (*.csv)"
+        )
+        if not path:
+            return
+        try:
+            rows = element_forces_table(self.model, self.pipeline_result, self.last_inputs, el_pattern="EL_X")
+            write_element_forces_csv(rows, path)
+            self.status.showMessage(f"Tabla de fuerzas exportada: {path}")
+            QtWidgets.QMessageBox.information(
+                self, "Vortex",
+                f"Tabla de fuerzas por elemento exportada a:\n{path}\n\n"
+                f"{len(rows)} filas (Frame, OutputCase, P, M3, V2, M2, V3, por estación) "
+                f"listas para comparar contra una tabla 'Element Forces - Frames' de SAP2000."
+            )
+        except Exception as exc:
+            self._show_error("Error al exportar la tabla de fuerzas", exc)
 
     def _show_error(self, title: str, exc: Exception) -> None:
         detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
