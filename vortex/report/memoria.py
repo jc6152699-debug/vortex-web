@@ -64,6 +64,12 @@ class ReportData:
     # usuario no consultó la IA antes de exportar — en ese caso la sección
     # se genera igual, con una nota indicándolo (ver `_add_ai_analysis`).
     ai_analysis: str = ""
+    # Filas de `vortex.analysis.pipeline.PipelineResult.base_plate_rows`
+    # (opcional: vacío si el usuario no suministró los datos de placa
+    # base/anclajes — ver `PipelineInputs.base_plate`). Duck-typing
+    # (.upright_label, .combo, .result) por la misma razón que
+    # `member_rows_detail`.
+    base_plate_rows: List[Any] = field(default_factory=list)
 
 
 def _add_title_page(doc: Document, data: ReportData) -> None:
@@ -445,6 +451,69 @@ def _add_resistencia_chequeo_tables(doc: Document, data: ReportData) -> None:
         )
 
 
+def _add_base_plate_table(doc: Document, data: ReportData) -> None:
+    """
+    Demanda en placa base y anclajes de cada paral apoyado en el piso
+    (numerales 7.2 y 8, NTC 5689). Se omite por completo si el usuario no
+    suministró los datos del anclaje real del proyecto (`PipelineInputs.
+    base_plate` es None) — no se inventa una geometría ni una capacidad de
+    anclaje que no se tiene.
+    """
+    if not data.base_plate_rows:
+        return
+    doc.add_heading("PLACA BASE Y ANCLAJES (PARALES DE PISO)", level=1)
+    doc.add_paragraph(
+        "Demanda calculada con el método elástico de grupo de pernos "
+        "(placa rígida) a partir de las reacciones de la base para la "
+        "combinación crítica de cada paral. La capacidad de los anclajes "
+        "(columnas \"Cap. tracción/cortante\") NO se recalcula aquí: es la "
+        "capacidad admisible suministrada por el usuario a partir del "
+        "informe de evaluación técnica (ICC-ES u homólogo) del fabricante "
+        "del anclaje, para el concreto, espesor de losa, espaciamiento y "
+        "distancia a borde REALES del proyecto. Falta además verificar la "
+        "capacidad del anclaje al concreto (arrancamiento por cono, "
+        "hendimiento, pryout — ACI 318 capítulo 17) con esa misma "
+        "geometría real, que es responsabilidad del calculista confirmar "
+        "contra dicho informe."
+    )
+    table = doc.add_table(rows=1, cols=8)
+    table.style = "Light Grid Accent 1"
+    headers = [
+        "Paral", "Combinación crítica", "Aplastamiento",
+        "Tensión anclaje [kN]", "Cap. tracción [kN]",
+        "Cortante anclaje [kN]", "Cap. cortante [kN]", "ESTADO",
+    ]
+    for i, h in enumerate(headers):
+        table.rows[0].cells[i].text = h
+    n_fail = 0
+    for row in data.base_plate_rows:
+        r = row.result
+        estado = "NO CUMPLE" if r.ratio > 1.0 else "OK"
+        if r.ratio > 1.0:
+            n_fail += 1
+        cells = table.add_row().cells
+        cells[0].text = row.upright_label
+        cells[1].text = row.combo
+        cells[2].text = f"{r.ratio_bearing:.2f}"
+        cells[3].text = f"{r.anchor_tension_max:.2f}"
+        cells[4].text = f"{row.anchor_capacity_tension_kn:.2f}"
+        cells[5].text = f"{r.anchor_shear_per_bolt:.2f}"
+        cells[6].text = f"{row.anchor_capacity_shear_kn:.2f}"
+        cells[7].text = estado
+    doc.add_paragraph()
+    if n_fail:
+        p = doc.add_paragraph()
+        p.add_run(
+            f"{n_fail} de {len(data.base_plate_rows)} placas base NO CUMPLEN "
+            f"(aplastamiento del concreto o capacidad del anclaje)."
+        ).bold = True
+    else:
+        doc.add_paragraph(
+            f"Las {len(data.base_plate_rows)} placas base cumplen con la "
+            f"capacidad de anclaje suministrada."
+        )
+
+
 def _add_element_index(doc: Document, data: ReportData) -> None:
     """
     Índice de TODOS los elementos del modelo (etiqueta -> ubicación física:
@@ -563,6 +632,7 @@ def generate_memoria(data: ReportData, output_path: str) -> str:
     _add_input_data(doc, data)
     _add_results(doc, data)
     _add_resistencia_chequeo_tables(doc, data)
+    _add_base_plate_table(doc, data)
     _add_element_index(doc, data)
     _add_ai_analysis(doc, data)
     _add_conclusions(doc, data)

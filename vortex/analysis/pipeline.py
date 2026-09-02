@@ -11,7 +11,7 @@ patrones de carga.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ..geometry.model import MemberKind, RackModel
 from ..loads.distribution import LoadDistribution, build_load_distribution
@@ -19,7 +19,7 @@ from ..loads.combinations import lrfd_combinations, LoadCase, Combination
 from ..loads import seismic as sm
 from ..design.upright_cfs import check_upright_compression_bending, UprightCheckResult
 from ..design.beam import check_beam, check_deflection, BeamCheckResult, beam_moment_at, beam_shear_at
-from ..design.connections import check_brace, BraceCheckResult
+from ..design.connections import check_brace, BraceCheckResult, check_base_plate, BasePlateResult
 from .solve import analyze, AnalysisResult, MemberLoad, NodalLoad
 
 
@@ -32,6 +32,37 @@ class SeismicInputs:
     hazardous_contents: bool = False
     public_access: bool = False
     pl_promedio_ratio: float = 1.0   # PLpromedio/PLmaxima, dirección longitudinal
+
+
+@dataclass
+class BasePlateInputs:
+    """
+    Datos necesarios para verificar la placa base / anclajes de cada paral
+    de la base (numerales 7.2 y 8, NTC 5689) con `design.connections.
+    check_base_plate` — antes esta verificación no se hacía en absoluto
+    porque nadie conectaba `check_base_plate` al pipeline, pese a que ya
+    existía. Sigue sin recalcular la capacidad del anclaje al concreto
+    (arrancamiento por cono, hendimiento, pryout — ACI 318 cap. 17): eso
+    debe venir del informe de evaluación técnica (ICC-ES u homólogo) del
+    anclaje real del proyecto, tal como se hace en la práctica. Este
+    dataclass sólo arma la DEMANDA (reacciones de la base) y la compara
+    contra esa capacidad ya conocida.
+
+    `anchor_spacing_x`/`anchor_spacing_y`: patrón rectangular de 4
+    anclajes (uno por esquina de la placa), el más común en parales de
+    estantería — separación entre anclajes en cada dirección, en metros.
+    """
+    plate_length: float          # m (dirección X global)
+    plate_width: float             # m (dirección Y global)
+    anchor_spacing_x: float          # m, separación entre anclajes en X
+    anchor_spacing_y: float            # m, separación entre anclajes en Y
+    f_c_concrete_mpa: float              # f'c del concreto de la cimentación
+    anchor_capacity_tension_kn: float      # por anclaje, del informe ICC-ES del fabricante
+    anchor_capacity_shear_kn: float          # por anclaje, ídem
+
+    def anchor_positions(self) -> List[Tuple[float, float]]:
+        hx, hy = self.anchor_spacing_x / 2.0, self.anchor_spacing_y / 2.0
+        return [(-hx, -hy), (hx, -hy), (-hx, hy), (hx, hy)]
 
 
 @dataclass
@@ -49,6 +80,11 @@ class PipelineInputs:
     # según la norma; esta opción permite reproducir la elección exacta
     # de un proyecto existente.
     apply_el_factor_10: bool = True
+    # Opcional: si se suministra, `run_full_check` también verifica la
+    # placa base/anclajes de cada paral apoyado en el piso (ver
+    # `BasePlateInputs`). Si es None (por defecto), esa verificación se
+    # omite igual que antes — no se inventa un dato que no se tiene.
+    base_plate: Optional[BasePlateInputs] = None
 
 
 @dataclass
@@ -67,6 +103,20 @@ class MemberResultRow:
 
 
 @dataclass
+class BasePlateRow:
+    upright_label: str
+    node_id: int
+    combo: str
+    result: BasePlateResult
+    anchor_capacity_tension_kn: float
+    anchor_capacity_shear_kn: float
+
+    @property
+    def ratio(self) -> float:
+        return self.result.ratio
+
+
+@dataclass
 class PipelineResult:
     patterns: Dict[str, AnalysisResult]
     seismic_transversal: sm.SeismicResult
@@ -80,6 +130,9 @@ class PipelineResult:
     ll_total_kn: float = 0.0            # kN, carga viva por nivel (todas las bahías)
     ll_grand_total_kn: float = 0.0        # kN, carga viva de TODO el rack (todas las bahías x niveles)
     load_distribution: Optional[LoadDistribution] = None  # reparto DL/PL/LL por viga (frame/bahía/nivel/lado)
+    # Una fila por paral apoyado en el piso (nivel 0), sólo si
+    # `PipelineInputs.base_plate` se suministró (ver `BasePlateInputs`).
+    base_plate_rows: List[BasePlateRow] = field(default_factory=list)
 
     def max_ratio(self) -> float:
         return max((r.ratio for r in self.member_rows.values()), default=0.0)
@@ -332,6 +385,55 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
             combo=best_combo, ratio=best_ratio, detail=best_detail, raw_force=abs(best_n),
             length_m=L, brace_check=best_r,
         )
+
+    # Placa base / anclajes de cada paral apoyado en el piso (nivel 0),
+    # sólo si el usuario suministró los datos (ver `BasePlateInputs`) —
+    # antes `check_base_plate` ya existía pero no se llamaba desde ningún
+    # lado, así que el software nunca calculaba ni reportaba esta demanda.
+    # La demanda (P, Mx, My, Vx, Vy) se arma con las REACCIONES en el
+    # nodo de la base, combinadas con los mismos factores de las
+    # combinaciones gravitacional y sísmica ya usadas para los parales.
+    if inputs.base_plate is not None:
+        bp = inputs.base_plate
+        anchor_positions = bp.anchor_positions()
+        for member in model.members_of_kind(MemberKind.UPRIGHT):
+            if member.level_index != 0:
+                continue  # sólo el tramo apoyado en el piso tiene placa base
+            node_id = member.node_i
+            best_ratio, best_combo, best_r = -1.0, "", None
+            for combo, el_pattern in ((combo_gravity, None), (combo_seismic, "EL_X"), (combo_seismic, "EL_Y")):
+                f_dl = combo.factors.get(LoadCase.DL, 0.0)
+                f_pl = combo.factors.get(LoadCase.PL, 0.0)
+                f_ll = combo.factors.get(LoadCase.LL, 0.0)
+                f_el = combo.factors.get(LoadCase.EL, 0.0)
+                react = (
+                    f_dl * patterns["DL"].reactions[node_id]
+                    + f_pl * patterns["PL"].reactions[node_id]
+                    + f_ll * patterns["LL"].reactions[node_id]
+                )
+                if el_pattern is not None:
+                    react = react + f_el * patterns[el_pattern].reactions[node_id]
+                # Reacción global (Fx,Fy,Fz,Mx,My,Mz): Fz = compresión(+)
+                # transmitida a la cimentación (ver tests/
+                # test_base_plate.py, verificado contra P_i del mismo
+                # paral bajo DL sola). Mx,My,Vx,Vy entran en valor
+                # absoluto dentro de `check_base_plate`, así que la
+                # convención de signo de la reacción no afecta el
+                # resultado en esos términos.
+                r = check_base_plate(
+                    combo.id, P=react[2], Mx=react[3], My=react[4], Vx=react[0], Vy=react[1],
+                    plate_length=bp.plate_length, plate_width=bp.plate_width,
+                    anchor_positions=anchor_positions, f_c_concrete_mpa=bp.f_c_concrete_mpa,
+                    anchor_capacity_tension_kn=bp.anchor_capacity_tension_kn,
+                    anchor_capacity_shear_kn=bp.anchor_capacity_shear_kn,
+                )
+                if r.ratio > best_ratio:
+                    best_ratio, best_combo, best_r = r.ratio, combo.label(), r
+            result.base_plate_rows.append(BasePlateRow(
+                upright_label=member.label, node_id=node_id, combo=best_combo, result=best_r,
+                anchor_capacity_tension_kn=bp.anchor_capacity_tension_kn,
+                anchor_capacity_shear_kn=bp.anchor_capacity_shear_kn,
+            ))
 
     return result
 

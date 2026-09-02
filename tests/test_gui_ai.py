@@ -1,11 +1,12 @@
 """
-Pruebas del asesor de IA (Groq), dentro de `vortex.gui.app` (a pedido
-explícito: toda la configuración y el código de Groq quedan en ese único
-archivo). El resumen de resultados se construye sin red, y la llamada a
-la API de Groq se valida con `requests.post` remplazado por un doble de
-prueba (sin salir a internet). El modelo lo elige el sistema
-(`get_recommendations_auto` prueba `CANDIDATE_MODELS` en orden) — no hay
-selector de modelo ni endpoint de listado expuesto al usuario.
+Pruebas de integración del asesor de IA (Groq) DESDE la GUI. La lógica en
+sí (resumen, llamada HTTP, manejo de errores, selección automática de
+modelo, resolución de la API key) vive en `vortex.ai.advisor` y se prueba
+ahí (ver tests/test_ai_advisor.py) — antes estaba duplicada en
+`vortex.gui.app`, con el riesgo de que las dos copias se desincronizaran
+(pasó: una tenía el manejo de HTTP 429/model_decommissioned y la otra no).
+Este archivo sólo verifica que la GUI reexporta y usa esas piezas
+correctamente, sin repetir toda la matriz de casos de error de red/HTTP.
 """
 import os
 import sys
@@ -20,6 +21,7 @@ from vortex.geometry import RackParameters, build_selective_rack
 from vortex.sections.catalog import default_catalog
 from vortex.analysis import PipelineInputs, SeismicInputs, run_full_check
 from vortex.units import kgf_to_kn
+from vortex.ai import advisor
 
 
 @pytest.fixture(scope="module")
@@ -61,81 +63,31 @@ def test_build_results_summary_contains_key_numbers(gui_app):
     assert summary.count("\n") >= 5  # cabecera + hasta 5 filas de elementos críticos
 
 
-def test_resolve_groq_api_key_prefers_env_var(gui_app, monkeypatch):
-    monkeypatch.setattr(gui_app, "GROQ_API_KEY", "from-constant")
-    monkeypatch.setenv("GROQ_API_KEY", "from-env")
-    assert gui_app._resolve_groq_api_key() == "from-env"
+def test_resolve_groq_api_key_delegates_to_advisor(gui_app, monkeypatch):
+    """La GUI ya NO tiene su propia constante de API key (era un riesgo:
+    editar un archivo versionado para guardar un secreto) — delega
+    enteramente en `vortex.ai.advisor.load_local_api_key`."""
+    monkeypatch.setattr(advisor, "load_local_api_key", lambda: "from-advisor")
+    assert gui_app._resolve_groq_api_key() == "from-advisor"
+    assert not hasattr(gui_app, "GROQ_API_KEY")
 
 
-def test_resolve_groq_api_key_falls_back_to_constant(gui_app, monkeypatch):
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    monkeypatch.setattr(gui_app, "GROQ_API_KEY", "from-constant")
-    assert gui_app._resolve_groq_api_key() == "from-constant"
+def test_candidate_models_is_the_shared_advisor_list(gui_app):
+    assert gui_app.CANDIDATE_MODELS is advisor.AVAILABLE_MODELS
 
 
-def test_get_recommendations_without_api_key_raises(gui_app):
-    with pytest.raises(gui_app.AdvisorError):
-        gui_app.get_recommendations("resumen de prueba", api_key="", model="cualquiera")
-
-
-def test_get_recommendations_success(gui_app, monkeypatch):
-    class _FakeResponse:
-        status_code = 200
-
-        def json(self):
-            return {"choices": [{"message": {"content": "  Recomendación de prueba.  "}}]}
-
-    def _fake_post(url, headers=None, json=None, timeout=None):
-        assert url == gui_app.GROQ_API_URL
-        assert headers["Authorization"] == "Bearer test-key"
-        assert json["model"] == "modelo-x"
-        return _FakeResponse()
-
-    monkeypatch.setattr(gui_app.requests, "post", _fake_post)
-    text = gui_app.get_recommendations("resumen", api_key="test-key", model="modelo-x")
-    assert text == "Recomendación de prueba."
-
-
-def test_get_recommendations_http_error(gui_app, monkeypatch):
-    class _FakeResponse:
-        status_code = 401
-        text = "unauthorized"
-
-        def json(self):
-            raise AssertionError("no debería llamarse json() en un error HTTP")
-
-    monkeypatch.setattr(gui_app.requests, "post", lambda *a, **k: _FakeResponse())
-    with pytest.raises(gui_app.AdvisorError, match="inválida"):
-        gui_app.get_recommendations("resumen", api_key="bad-key", model="modelo-x")
-
-
-def test_get_recommendations_network_error(gui_app, monkeypatch):
-    import requests
-
-    def _raise(*a, **k):
-        raise requests.exceptions.ConnectionError("sin red")
-
-    monkeypatch.setattr(gui_app.requests, "post", _raise)
-    with pytest.raises(gui_app.AdvisorError, match="red"):
-        gui_app.get_recommendations("resumen", api_key="test-key", model="modelo-x")
-
-
-def test_get_recommendations_model_not_found(gui_app, monkeypatch):
-    class _FakeResponse:
-        status_code = 404
-        text = '{"error": {"code": "model_not_found"}}'
-
-        def json(self):
-            return {"error": {"code": "model_not_found", "message": "no existe"}}
-
-    monkeypatch.setattr(gui_app.requests, "post", lambda *a, **k: _FakeResponse())
-    with pytest.raises(gui_app.AdvisorError, match="model_not_found"):
-        gui_app.get_recommendations("resumen", api_key="test-key", model="modelo-viejo")
+def test_get_recommendations_auto_is_the_shared_advisor_function(gui_app):
+    """`get_recommendations_auto` (probar cada modelo en orden hasta que
+    uno responda) es la misma función de `vortex.ai.advisor` — la GUI no
+    mantiene su propia copia."""
+    assert gui_app.get_recommendations_auto is advisor.get_recommendations_auto
 
 
 def test_get_recommendations_auto_skips_models_that_dont_exist(gui_app, monkeypatch):
     """El sistema elige el modelo: si el primer candidato no existe,
-    prueba el siguiente sin que el usuario tenga que hacer nada."""
+    prueba el siguiente sin que el usuario tenga que hacer nada. Se
+    monkeypatchea `advisor.requests` (donde ocurre la llamada real), no
+    `gui_app.requests` (que ya no existe tras la consolidación)."""
     calls = []
 
     def _fake_post(url, headers=None, json=None, timeout=None):
@@ -154,7 +106,7 @@ def test_get_recommendations_auto_skips_models_that_dont_exist(gui_app, monkeypa
 
         return _Resp(ok=(json["model"] == "modelo-bueno"))
 
-    monkeypatch.setattr(gui_app.requests, "post", _fake_post)
+    monkeypatch.setattr(advisor.requests, "post", _fake_post)
     text = gui_app.get_recommendations_auto(
         "resumen", api_key="test-key", models=["modelo-malo-1", "modelo-malo-2", "modelo-bueno"],
     )
@@ -170,7 +122,7 @@ def test_get_recommendations_auto_raises_when_all_models_fail(gui_app, monkeypat
         def json(self):
             return {"error": {"code": "model_not_found"}}
 
-    monkeypatch.setattr(gui_app.requests, "post", lambda *a, **k: _FakeResponse())
+    monkeypatch.setattr(advisor.requests, "post", lambda *a, **k: _FakeResponse())
     with pytest.raises(gui_app.AdvisorError, match="Ningún modelo"):
         gui_app.get_recommendations_auto(
             "resumen", api_key="test-key", models=["modelo-malo-1", "modelo-malo-2"],

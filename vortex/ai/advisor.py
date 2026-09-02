@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
-from typing import List, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING
 
 import requests
 
@@ -25,16 +25,29 @@ if TYPE_CHECKING:
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODELS_URL = "https://api.groq.com/openai/v1/models"
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
-# Lista de referencia (offline) para cuando aún no se ha consultado la API
-# de Groq: los modelos realmente disponibles cambian con el tiempo y según
-# la cuenta, así que la GUI ofrece un botón "🔄" que llama a
-# `list_available_models()` y reemplaza esta lista con la real.
+# Lista de referencia (offline), usada por `get_recommendations_auto` para
+# elegir el modelo sin que el usuario tenga que hacerlo: se prueba cada uno
+# en orden y se usa el primero que responda. Los modelos realmente
+# disponibles cambian con el tiempo y según la cuenta — para consultar la
+# lista real de una API key, use `list_available_models()`.
+#
+# Lista actualizada 2026-09-02 según la página oficial de deprecaciones de
+# Groq (https://console.groq.com/docs/deprecations): a esa fecha, los
+# modelos que antes estaban aquí (llama-3.1-8b-instant, llama-3.3-70b-
+# versatile, llama-3.1-70b-versatile, gemma2-9b-it) ya habían sido
+# retirados ("model_decommissioned"). Los modelos de producción vigentes
+# recomendados por Groq como reemplazo son openai/gpt-oss-120b y
+# openai/gpt-oss-20b; qwen/qwen3.6-27b se deja como tercera opción (modelo
+# "preview" de Groq, no garantizado para producción, pero útil como
+# último respaldo). Si en el futuro alguno de éstos también se retira,
+# revisar esa misma página y actualizar esta lista — el resto del código
+# no necesita cambios.
 AVAILABLE_MODELS = [
-    "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant",
     "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.6-27b",
 ]
+DEFAULT_MODEL = AVAILABLE_MODELS[0]
 
 # Archivo .py local (NO versionado, ver .gitignore + local_config.example.py)
 # que el usuario edita directamente para pegar su API key de Groq — nunca
@@ -189,6 +202,12 @@ def get_recommendations(
                 f"tu cuenta, y elige uno de ahí."
             )
         raise AdvisorError(f"Groq respondió con error HTTP 404: {resp.text[:500]}")
+    if resp.status_code == 400 and _error_code(resp) == "model_decommissioned":
+        raise AdvisorError(
+            f"model_decommissioned: Groq retiró el modelo '{model}'. Revise "
+            f"https://console.groq.com/docs/deprecations y actualice "
+            f"AVAILABLE_MODELS en vortex/ai/advisor.py con el reemplazo vigente."
+        )
     if resp.status_code >= 400:
         raise AdvisorError(f"Groq respondió con error HTTP {resp.status_code}: {resp.text[:500]}")
 
@@ -197,6 +216,36 @@ def get_recommendations(
         return data["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, ValueError) as exc:
         raise AdvisorError(f"Respuesta inesperada de Groq: {exc}") from exc
+
+
+def get_recommendations_auto(
+    summary: str, api_key: str, models: List[str] = AVAILABLE_MODELS, timeout: float = 30.0,
+) -> str:
+    """
+    Igual que `get_recommendations`, pero el modelo lo elige el sistema:
+    prueba cada modelo de `models` en orden y devuelve la respuesta del
+    primero que funcione — el usuario nunca tiene que elegir ni ver una
+    lista de modelos. Sólo si NINGUNO de los modelos candidatos responde
+    (por ejemplo, todos retirados de Groq) se lanza `AdvisorError` con el
+    detalle del último intento.
+    """
+    if not api_key:
+        raise AdvisorError(
+            "No se configuró una API key de Groq. Consigue una gratis en "
+            "https://console.groq.com/keys y pégala en el campo correspondiente "
+            "(o defínela como variable de entorno GROQ_API_KEY)."
+        )
+    last_error: Optional[AdvisorError] = None
+    for model in models:
+        try:
+            return get_recommendations(summary, api_key, model, timeout=timeout)
+        except AdvisorError as exc:
+            last_error = exc
+            continue
+    raise AdvisorError(
+        f"Ningún modelo de la lista interna de Vortex (AVAILABLE_MODELS en "
+        f"vortex/ai/advisor.py) respondió. Último error: {last_error}"
+    )
 
 
 def _error_code(resp: "requests.Response") -> str:

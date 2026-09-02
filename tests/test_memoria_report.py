@@ -14,11 +14,12 @@ from docx import Document
 from vortex.geometry import RackParameters, build_selective_rack
 from vortex.sections.catalog import default_catalog
 from vortex.analysis import PipelineInputs, SeismicInputs, run_full_check
+from vortex.analysis.pipeline import BasePlateInputs
 from vortex.report import ProjectInfo, ReportData, generate_memoria
 from vortex.units import kgf_to_kn
 
 
-def _build_report_data(ai_analysis: str = "") -> ReportData:
+def _build_report_data(ai_analysis: str = "", with_base_plate: bool = False) -> ReportData:
     catalog = default_catalog()
     params = RackParameters(
         n_bays=2, bay_length=2.44, frame_depth=1.06, level_heights=[1.20, 1.80, 1.80],
@@ -28,11 +29,19 @@ def _build_report_data(ai_analysis: str = "") -> ReportData:
         base_fixity="pinned",
     )
     model = build_selective_rack(params)
+    base_plate = BasePlateInputs(
+        plate_length=0.15, plate_width=0.15,
+        anchor_spacing_x=0.10, anchor_spacing_y=0.10,
+        f_c_concrete_mpa=21.0,
+        anchor_capacity_tension_kn=15.0,
+        anchor_capacity_shear_kn=10.0,
+    ) if with_base_plate else None
     inputs = PipelineInputs(
         # Carga de producto deliberadamente alta para asegurar que al
         # menos un paral NO CUMPLA en este modelo pequeño de prueba.
         pl_per_level_kn=kgf_to_kn(12000.0), ll_kn_m2=0.0,
         seismic=SeismicInputs(soil_type="D", aa=0.15, av=0.20),
+        base_plate=base_plate,
     )
     result = run_full_check(model, inputs)
     design_rows = [
@@ -56,6 +65,7 @@ def _build_report_data(ai_analysis: str = "") -> ReportData:
         method_name="LRFD", combos=result.combos, design_rows=design_rows,
         member_rows_detail=list(result.member_rows.values()),
         ai_analysis=ai_analysis,
+        base_plate_rows=result.base_plate_rows,
     )
 
 
@@ -134,3 +144,31 @@ def test_ai_section_includes_real_analysis_text(tmp_path):
     doc = Document(str(out))
     full_text = "\n".join(p.text for p in doc.paragraphs)
     assert "Revisar el paral M1-F N0-N1 por alta utilización." in full_text
+
+
+def test_base_plate_table_omitted_when_not_configured(tmp_path):
+    data = _build_report_data(with_base_plate=False)
+    out = tmp_path / "m.docx"
+    generate_memoria(data, str(out))
+    doc = Document(str(out))
+    full_text = "\n".join(p.text for p in doc.paragraphs)
+    assert "PLACA BASE Y ANCLAJES" not in full_text
+
+
+def test_base_plate_table_appears_when_configured(tmp_path):
+    data = _build_report_data(with_base_plate=True)
+    assert data.base_plate_rows, "se esperaban filas de placa base en este modelo de prueba"
+    out = tmp_path / "m.docx"
+    generate_memoria(data, str(out))
+    doc = Document(str(out))
+    full_text = "\n".join(p.text for p in doc.paragraphs)
+    assert "PLACA BASE Y ANCLAJES" in full_text
+
+    table = _table_after_heading(doc, "PLACA BASE Y ANCLAJES")
+    header = [c.text for c in table.rows[0].cells]
+    assert "Cap. tracción [kN]" in header
+    assert "Cap. cortante [kN]" in header
+    idx_cap_tension = header.index("Cap. tracción [kN]")
+    assert len(table.rows) - 1 == len(data.base_plate_rows)
+    for row in table.rows[1:]:
+        assert row.cells[idx_cap_tension].text == "15.00"

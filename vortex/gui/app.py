@@ -8,12 +8,10 @@ herramientas superior, panel de propiedades) y SAP2000 (análisis matricial
 from __future__ import annotations
 
 import datetime
-import os
 import sys
 import traceback
-from typing import List, Optional
+from typing import Optional
 
-import requests
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..geometry import (
@@ -26,10 +24,12 @@ from ..sections.catalog import default_catalog
 from ..loads.seismic import AA_AV_BY_CITY
 from ..analysis import (
     PipelineInputs, PipelineResult, SeismicInputs, run_full_check,
-    element_forces_table, write_element_forces_csv,
+    element_forces_table, write_element_forces_csv, BasePlateInputs,
 )
 from ..report import ProjectInfo, ReportData, generate_memoria
 from ..units import kgf_to_kn
+from ..ai import advisor
+from ..ai.advisor import AdvisorError, build_results_summary, get_recommendations_auto
 from .viewer3d import Viewer3D
 from .legend import ColorLegend
 from .theme import apply_dark_theme
@@ -39,204 +39,28 @@ SOIL_TYPES = ["A", "B", "C", "D", "E"]
 BRACE_ANGLES_DEG = [30, 45, 60, 65, 70, 75]
 
 # =====================================================================
-# Recomendaciones IA (Groq) — TODO lo relacionado con Groq vive aquí, en
-# este mismo archivo, a propósito: para configurar tu API key basta con
-# editar la línea de abajo, sin buscar en otro archivo ni módulo.
+# Recomendaciones IA (Groq) — la configuración de la API key, el resumen
+# de resultados y la llamada HTTP viven en `vortex.ai.advisor` (un único
+# lugar, reutilizable también fuera de la GUI); antes ese mismo código
+# estaba DUPLICADO aquí, con el riesgo de que las dos copias se
+# desincronizaran (p.ej. una recibía el manejo de HTTP 429/
+# model_decommissioned y la otra no). La GUI sólo reexporta lo que usa
+# y le agrega la selección automática de modelo (`get_recommendations_auto`,
+# ya definida en `advisor`) y el hilo de Qt para no bloquear la interfaz.
 #
-#   GROQ_API_KEY = "gsk_TU_LLAVE_AQUI"
-#
-# Consigue una API key gratuita en https://console.groq.com/keys. Este
-# archivo (vortex/gui/app.py) es parte del código fuente normal del
-# proyecto: si compartes o subes este repositorio a un lugar público,
-# recuerda quitar tu key antes (o usar la variable de entorno
-# GROQ_API_KEY en su lugar, que tiene prioridad sobre esta constante y
-# nunca queda escrita en ningún archivo).
+# La API key NUNCA se pide ni se muestra en un campo de la interfaz
+# gráfica ni se guarda en una constante de este archivo (fuente
+# versionada): ver `vortex.ai.advisor.load_local_api_key` — variable de
+# entorno GROQ_API_KEY, o vortex/ai/local_config.py, o .groq_api_key en
+# la raíz del proyecto (ambos archivos gitignored). Consigue una API key
+# gratuita en https://console.groq.com/keys.
 # =====================================================================
-GROQ_API_KEY = ""
-
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-# El modelo lo elige el sistema, no el usuario: se prueban estos modelos
-# de chat de Groq en orden y se usa el primero que responda. Se dejaron
-# de listar los modelos vía la API de Groq (GET /models) porque esa lista
-# incluye TODOS los modelos de la cuenta -- también los que no son de
-# chat (voz, transcripción, moderación, etc.) -- y el selector podía
-# terminar eligiendo uno de esos por error (p.ej. un modelo de
-# texto-a-voz), lo cual nunca iba a funcionar para esto. Esta lista fija
-# sólo tiene modelos de chat conocidos; si Groq retira uno, el sistema
-# simplemente prueba el siguiente sin que el usuario tenga que hacer nada.
-#
-# Lista actualizada 2026-09-02 según la página oficial de deprecaciones de
-# Groq (https://console.groq.com/docs/deprecations): a esa fecha, TODOS los
-# modelos que antes estaban aquí (llama-3.1-8b-instant, llama-3.3-70b-
-# versatile, llama-3.1-70b-versatile, gemma2-9b-it) ya habían sido retirados
-# ("model_decommissioned"). Los modelos de producción vigentes recomendados
-# por Groq como reemplazo son openai/gpt-oss-120b y openai/gpt-oss-20b;
-# qwen/qwen3.6-27b se deja como tercera opción (modelo "preview" de Groq,
-# no garantizado para producción, pero útil como último respaldo). Si en el
-# futuro alguno de éstos también se retira, revisar esa misma página y
-# actualizar esta lista — el resto del código no necesita cambios.
-CANDIDATE_MODELS = [
-    "openai/gpt-oss-120b",
-    "openai/gpt-oss-20b",
-    "qwen/qwen3.6-27b",
-]
-
-SYSTEM_PROMPT = (
-    "Eres un ingeniero estructural senior, experto en diseño de estanterías "
-    "industriales de acero (racks selectivos) según NSR-10 Título F (perfiles "
-    "conformados en frío, AISI S100), NTC 5689:2009 y RMI ANSI MH16.1. "
-    "Recibes un resumen numérico de un chequeo estructural generado por el "
-    "software Vortex (análisis matricial 3D + verificación miembro por "
-    "miembro). Da recomendaciones de ingeniería concretas y priorizadas por "
-    "severidad, en español, dirigidas a un calculista que va a firmar la "
-    "memoria de cálculo. Sé específico: nombra el elemento, la relación "
-    "demanda/capacidad, y una acción concreta (cambiar sección, revisar "
-    "arriostramiento, verificar un dato de entrada, etc.). No inventes "
-    "valores que no estén en el resumen. Si algo luce como un posible error "
-    "de datos de entrada (por ejemplo Aa=0 en una ciudad de amenaza sísmica "
-    "alta), dilo explícitamente. Responde en viñetas, máximo ~300 palabras."
-)
-
-
-class AdvisorError(RuntimeError):
-    """Error al construir el resumen o al consultar la API de Groq."""
+CANDIDATE_MODELS = advisor.AVAILABLE_MODELS
+SYSTEM_PROMPT = advisor.SYSTEM_PROMPT
 
 
 def _resolve_groq_api_key() -> str:
-    """Variable de entorno GROQ_API_KEY (si está definida) tiene
-    prioridad; si no, la constante GROQ_API_KEY editada arriba en este
-    mismo archivo."""
-    return os.environ.get("GROQ_API_KEY", "").strip() or GROQ_API_KEY.strip()
-
-
-def build_results_summary(
-    model: RackModel, result: PipelineResult, inputs: PipelineInputs,
-    n_worst: int = 10,
-) -> str:
-    """
-    Resumen textual compacto (no exhaustivo) del modelo y de los resultados
-    del análisis, pensado para caber en el contexto de un LLM sin exponer
-    la tabla completa de elementos.
-    """
-    rows = sorted(result.member_rows.values(), key=lambda r: -r.ratio)
-    n_fail = sum(1 for r in rows if r.ratio > 1.0)
-    worst = rows[:n_worst]
-
-    lines = [
-        f"Modelo: {len(model.nodes)} nudos, {len(model.members)} elementos.",
-        (
-            f"Sismo transversal: Aa={inputs.seismic.aa}, Av={inputs.seismic.av}, "
-            f"suelo={inputs.seismic.soil_type}, Cs={result.seismic_transversal.cs:.4f}, "
-            f"V={result.seismic_transversal.v_base:.2f} kN."
-        ),
-        (
-            f"Sismo longitudinal: Cs={result.seismic_longitudinal.cs:.4f}, "
-            f"V={result.seismic_longitudinal.v_base:.2f} kN."
-        ),
-        (
-            f"Carga de producto: {inputs.pl_per_level_kn:.2f} kN/nivel-bahía. "
-            f"Carga viva: {inputs.ll_kn_m2:.2f} kN/m²."
-        ),
-        f"Elementos verificados: {len(rows)}. No cumplen (ratio > 1.0): {n_fail}.",
-        f"Los {len(worst)} elementos más críticos (ratio de utilización descendente):",
-    ]
-    for r in worst:
-        lines.append(f"  - {r.label} ({r.kind}), combo {r.combo}: ratio={r.ratio:.2f}, {r.detail}")
-    return "\n".join(lines)
-
-
-def _groq_error_code(resp: "requests.Response") -> str:
-    try:
-        return str(resp.json().get("error", {}).get("code", ""))
-    except (ValueError, AttributeError):
-        return ""
-
-
-def get_recommendations(
-    summary: str, api_key: str, model: str, timeout: float = 30.0,
-) -> str:
-    """Envía `summary` a la API de Groq (Chat Completions) y devuelve el
-    texto de la respuesta. Lanza `AdvisorError` con un mensaje claro ante
-    cualquier falla (sin API key, red, HTTP, formato de respuesta)."""
-    if not api_key:
-        raise AdvisorError(
-            "No se configuró una API key de Groq. Consigue una gratis en "
-            "https://console.groq.com/keys y pégala en la constante "
-            "GROQ_API_KEY al inicio de vortex/gui/app.py (o defínela como "
-            "variable de entorno GROQ_API_KEY)."
-        )
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": summary},
-        ],
-        "temperature": 0.2,
-        "max_tokens": 900,
-    }
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
-    try:
-        resp = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=timeout)
-    except requests.exceptions.RequestException as exc:
-        raise AdvisorError(f"Error de red al contactar Groq: {exc}") from exc
-
-    if resp.status_code == 401:
-        raise AdvisorError("API key de Groq inválida o expirada (HTTP 401).")
-    if resp.status_code == 429:
-        raise AdvisorError(
-            "Límite de tasa de la API de Groq alcanzado (HTTP 429). Intente de nuevo en unos segundos."
-        )
-    if resp.status_code == 404:
-        code = _groq_error_code(resp)
-        if code == "model_not_found":
-            raise AdvisorError(f"model_not_found: el modelo '{model}' no está disponible.")
-        raise AdvisorError(f"Groq respondió con error HTTP 404: {resp.text[:500]}")
-    if resp.status_code == 400 and _groq_error_code(resp) == "model_decommissioned":
-        raise AdvisorError(
-            f"model_decommissioned: Groq retiró el modelo '{model}'. Revise "
-            f"https://console.groq.com/docs/deprecations y actualice "
-            f"CANDIDATE_MODELS en vortex/gui/app.py con el reemplazo vigente."
-        )
-    if resp.status_code >= 400:
-        raise AdvisorError(f"Groq respondió con error HTTP {resp.status_code}: {resp.text[:500]}")
-
-    try:
-        data = resp.json()
-        return data["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError, ValueError) as exc:
-        raise AdvisorError(f"Respuesta inesperada de Groq: {exc}") from exc
-
-
-def get_recommendations_auto(
-    summary: str, api_key: str, models: List[str] = CANDIDATE_MODELS, timeout: float = 30.0,
-) -> str:
-    """
-    Igual que `get_recommendations`, pero el modelo lo elige el sistema:
-    prueba cada modelo de `models` en orden y devuelve la respuesta del
-    primero que funcione — el usuario nunca tiene que elegir ni ver una
-    lista de modelos. Sólo si NINGUNO de los modelos candidatos responde
-    (por ejemplo, todos retirados de Groq) se lanza `AdvisorError` con el
-    detalle del último intento.
-    """
-    if not api_key:
-        raise AdvisorError(
-            "No se configuró una API key de Groq. Consigue una gratis en "
-            "https://console.groq.com/keys y pégala en la constante "
-            "GROQ_API_KEY al inicio de vortex/gui/app.py (o defínela como "
-            "variable de entorno GROQ_API_KEY)."
-        )
-    last_error: Optional[AdvisorError] = None
-    for model in models:
-        try:
-            return get_recommendations(summary, api_key, model, timeout=timeout)
-        except AdvisorError as exc:
-            last_error = exc
-            continue
-    raise AdvisorError(
-        f"Ningún modelo de la lista interna de Vortex (CANDIDATE_MODELS en "
-        f"vortex/gui/app.py) respondió. Último error: {last_error}"
-    )
+    return advisor.load_local_api_key()
 
 
 class _AdvisorWorker(QtCore.QObject):
@@ -802,7 +626,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # sin intervención del usuario — ver get_recommendations_auto().
         model_note = QtWidgets.QLabel(
             "El modelo de IA lo elige el sistema automáticamente "
-            "(vortex/gui/app.py, CANDIDATE_MODELS) — no hay nada que "
+            "(vortex/ai/advisor.py, AVAILABLE_MODELS) — no hay nada que "
             "configurar aquí."
         )
         model_note.setWordWrap(True)
@@ -810,9 +634,10 @@ class MainWindow(QtWidgets.QMainWindow):
         cfg_form.addRow(model_note)
 
         # La API key NO se pide ni se muestra en la interfaz: se configura
-        # directamente en la constante GROQ_API_KEY al inicio de este mismo
-        # archivo (vortex/gui/app.py), o en la variable de entorno
-        # GROQ_API_KEY (tiene prioridad).
+        # en vortex/ai/local_config.py, en .groq_api_key (raíz del
+        # proyecto, ambos gitignored), o en la variable de entorno
+        # GROQ_API_KEY (máxima prioridad) — ver
+        # `vortex.ai.advisor.load_local_api_key`.
         key_status = QtWidgets.QLabel(self._groq_key_status_text())
         key_status.setWordWrap(True)
         key_status.setStyleSheet("color: #96a1ad; font-size: 10px;")
@@ -991,6 +816,58 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(seis_box)
         self._on_city_changed(self.cb_city.currentText())
 
+        bp_box = QtWidgets.QGroupBox("⚓ Placa base / anclajes (opcional)")
+        bp_form = QtWidgets.QFormLayout(bp_box)
+        self.chk_base_plate = QtWidgets.QCheckBox("Verificar placa base y anclajes")
+        self.chk_base_plate.setChecked(False)
+        self.chk_base_plate.toggled.connect(self._on_base_plate_toggled)
+        bp_form.addRow(self.chk_base_plate)
+
+        self.sp_bp_length = QtWidgets.QDoubleSpinBox()
+        self.sp_bp_length.setRange(0.05, 1.0); self.sp_bp_length.setSingleStep(0.01)
+        self.sp_bp_length.setValue(0.15); self.sp_bp_length.setSuffix(" m")
+        bp_form.addRow("Largo de placa (X)", self.sp_bp_length)
+
+        self.sp_bp_width = QtWidgets.QDoubleSpinBox()
+        self.sp_bp_width.setRange(0.05, 1.0); self.sp_bp_width.setSingleStep(0.01)
+        self.sp_bp_width.setValue(0.15); self.sp_bp_width.setSuffix(" m")
+        bp_form.addRow("Ancho de placa (Y)", self.sp_bp_width)
+
+        self.sp_bp_spacing_x = QtWidgets.QDoubleSpinBox()
+        self.sp_bp_spacing_x.setRange(0.02, 0.9); self.sp_bp_spacing_x.setSingleStep(0.01)
+        self.sp_bp_spacing_x.setValue(0.10); self.sp_bp_spacing_x.setSuffix(" m")
+        bp_form.addRow("Separación anclajes (X)", self.sp_bp_spacing_x)
+
+        self.sp_bp_spacing_y = QtWidgets.QDoubleSpinBox()
+        self.sp_bp_spacing_y.setRange(0.02, 0.9); self.sp_bp_spacing_y.setSingleStep(0.01)
+        self.sp_bp_spacing_y.setValue(0.10); self.sp_bp_spacing_y.setSuffix(" m")
+        bp_form.addRow("Separación anclajes (Y)", self.sp_bp_spacing_y)
+
+        self.sp_bp_fc = QtWidgets.QDoubleSpinBox()
+        self.sp_bp_fc.setRange(10.0, 50.0); self.sp_bp_fc.setValue(21.0); self.sp_bp_fc.setSuffix(" MPa")
+        bp_form.addRow("f'c del concreto", self.sp_bp_fc)
+
+        self.sp_bp_anchor_tension = QtWidgets.QDoubleSpinBox()
+        self.sp_bp_anchor_tension.setRange(0.0, 500.0); self.sp_bp_anchor_tension.setSuffix(" kN")
+        bp_form.addRow("Cap. tracción por anclaje", self.sp_bp_anchor_tension)
+
+        self.sp_bp_anchor_shear = QtWidgets.QDoubleSpinBox()
+        self.sp_bp_anchor_shear.setRange(0.0, 500.0); self.sp_bp_anchor_shear.setSuffix(" kN")
+        bp_form.addRow("Cap. cortante por anclaje", self.sp_bp_anchor_shear)
+
+        bp_hint = QtWidgets.QLabel(
+            "Patrón de 4 anclajes (uno por esquina). Las capacidades de "
+            "tracción y cortante por anclaje deben venir del informe de "
+            "evaluación técnica (ICC-ES u homólogo) del anclaje real del "
+            "proyecto — este chequeo NO recalcula la capacidad al concreto "
+            "(ACI 318 cap. 17), sólo la demanda."
+        )
+        bp_hint.setWordWrap(True)
+        bp_hint.setStyleSheet("color: #96a1ad; font-size: 10px;")
+        bp_form.addRow(bp_hint)
+        layout.addWidget(bp_box)
+        self._on_base_plate_toggled(self.chk_base_plate.isChecked())
+
         layout.addStretch(1)
 
         disclaimer = QtWidgets.QLabel(
@@ -1004,6 +881,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._update_brace_preview()
         return panel
+
+    def _on_base_plate_toggled(self, checked: bool) -> None:
+        for w in (
+            self.sp_bp_length, self.sp_bp_width, self.sp_bp_spacing_x, self.sp_bp_spacing_y,
+            self.sp_bp_fc, self.sp_bp_anchor_tension, self.sp_bp_anchor_shear,
+        ):
+            w.setEnabled(checked)
+
+    def _current_base_plate_inputs(self) -> Optional[BasePlateInputs]:
+        if not self.chk_base_plate.isChecked():
+            return None
+        return BasePlateInputs(
+            plate_length=self.sp_bp_length.value(), plate_width=self.sp_bp_width.value(),
+            anchor_spacing_x=self.sp_bp_spacing_x.value(), anchor_spacing_y=self.sp_bp_spacing_y.value(),
+            f_c_concrete_mpa=self.sp_bp_fc.value(),
+            anchor_capacity_tension_kn=self.sp_bp_anchor_tension.value(),
+            anchor_capacity_shear_kn=self.sp_bp_anchor_shear.value(),
+        )
 
     def _on_city_changed(self, city: str) -> None:
         data = AA_AV_BY_CITY.get(city)
@@ -1116,6 +1011,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     pl_promedio_ratio=self.sp_pl_promedio_ratio.value(),
                 ),
                 apply_el_factor_10=self.chk_el_relaxed.isChecked(),
+                base_plate=self._current_base_plate_inputs(),
             )
             self.last_inputs = inputs
             QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
@@ -1268,6 +1164,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 design_rows=design_rows,
                 member_rows_detail=list(self.pipeline_result.member_rows.values()),
                 ai_analysis=self.txt_ai_output.toPlainText(),
+                base_plate_rows=self.pipeline_result.base_plate_rows,
             )
             generate_memoria(data, path)
             self.status.showMessage(f"Memoria de cálculo exportada: {path}")
@@ -1399,10 +1296,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _groq_key_status_text(self) -> str:
         configured = bool(_resolve_groq_api_key())
         if configured:
-            return "✓ API key de Groq configurada (GROQ_API_KEY en vortex/gui/app.py)."
+            return "✓ API key de Groq configurada."
         return (
-            "Sin API key configurada. Edite la constante GROQ_API_KEY al inicio "
-            "de vortex/gui/app.py y pegue ahí su API key de "
+            "Sin API key configurada. Copie vortex/ai/local_config.example.py "
+            "a vortex/ai/local_config.py y pegue ahí su API key de "
             "https://console.groq.com/keys, o defina la variable de entorno "
             "GROQ_API_KEY."
         )
