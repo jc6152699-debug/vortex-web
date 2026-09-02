@@ -55,15 +55,20 @@ BRACE_ANGLES_DEG = [30, 45, 60, 65, 70, 75]
 GROQ_API_KEY = ""
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODELS_URL = "https://api.groq.com/openai/v1/models"
-# Los modelos realmente disponibles en Groq cambian con el tiempo y según
-# la cuenta — este es solo un valor de arranque; use el botón "🔄" del
-# panel de IA para listar los que su cuenta puede usar de verdad.
-DEFAULT_MODEL = "llama-3.1-8b-instant"
-AVAILABLE_MODELS = [
+# El modelo lo elige el sistema, no el usuario: se prueban estos modelos
+# de chat de Groq en orden y se usa el primero que responda. Se dejaron
+# de listar los modelos vía la API de Groq (GET /models) porque esa lista
+# incluye TODOS los modelos de la cuenta -- también los que no son de
+# chat (voz, transcripción, moderación, etc.) -- y el selector podía
+# terminar eligiendo uno de esos por error (p.ej. un modelo de
+# texto-a-voz), lo cual nunca iba a funcionar para esto. Esta lista fija
+# sólo tiene modelos de chat conocidos; si Groq retira uno, el sistema
+# simplemente prueba el siguiente sin que el usuario tenga que hacer nada.
+CANDIDATE_MODELS = [
     "llama-3.1-8b-instant",
     "llama-3.3-70b-versatile",
-    "openai/gpt-oss-120b",
+    "llama-3.1-70b-versatile",
+    "gemma2-9b-it",
 ]
 
 SYSTEM_PROMPT = (
@@ -138,7 +143,7 @@ def _groq_error_code(resp: "requests.Response") -> str:
 
 
 def get_recommendations(
-    summary: str, api_key: str, model: str = DEFAULT_MODEL, timeout: float = 30.0,
+    summary: str, api_key: str, model: str, timeout: float = 30.0,
 ) -> str:
     """Envía `summary` a la API de Groq (Chat Completions) y devuelve el
     texto de la respuesta. Lanza `AdvisorError` con un mensaje claro ante
@@ -175,12 +180,7 @@ def get_recommendations(
     if resp.status_code == 404:
         code = _groq_error_code(resp)
         if code == "model_not_found":
-            raise AdvisorError(
-                f"El modelo '{model}' no existe o tu cuenta de Groq no tiene acceso a él "
-                f"(HTTP 404). Los modelos disponibles cambian con el tiempo — presiona el "
-                f"botón '🔄' junto al selector de modelo para listar los que sí puede usar "
-                f"tu cuenta, y elige uno de ahí."
-            )
+            raise AdvisorError(f"model_not_found: el modelo '{model}' no está disponible.")
         raise AdvisorError(f"Groq respondió con error HTTP 404: {resp.text[:500]}")
     if resp.status_code >= 400:
         raise AdvisorError(f"Groq respondió con error HTTP {resp.status_code}: {resp.text[:500]}")
@@ -192,82 +192,59 @@ def get_recommendations(
         raise AdvisorError(f"Respuesta inesperada de Groq: {exc}") from exc
 
 
-def list_available_models(api_key: str, timeout: float = 15.0) -> List[str]:
+def get_recommendations_auto(
+    summary: str, api_key: str, models: List[str] = CANDIDATE_MODELS, timeout: float = 30.0,
+) -> str:
     """
-    Consulta la lista real de modelos disponibles para esta API key
-    (GET /openai/v1/models de Groq) — evita depender de una lista de
-    nombres fija en el código, que queda desactualizada cuando Groq agrega,
-    renombra o retira modelos. Lanza `AdvisorError` con el mismo criterio
-    que `get_recommendations`.
+    Igual que `get_recommendations`, pero el modelo lo elige el sistema:
+    prueba cada modelo de `models` en orden y devuelve la respuesta del
+    primero que funcione — el usuario nunca tiene que elegir ni ver una
+    lista de modelos. Sólo si NINGUNO de los modelos candidatos responde
+    (por ejemplo, todos retirados de Groq) se lanza `AdvisorError` con el
+    detalle del último intento.
     """
     if not api_key:
         raise AdvisorError(
             "No se configuró una API key de Groq. Consigue una gratis en "
-            "https://console.groq.com/keys."
+            "https://console.groq.com/keys y pégala en la constante "
+            "GROQ_API_KEY al inicio de vortex/gui/app.py (o defínela como "
+            "variable de entorno GROQ_API_KEY)."
         )
-    headers = {"Authorization": f"Bearer {api_key}"}
-    try:
-        resp = requests.get(GROQ_MODELS_URL, headers=headers, timeout=timeout)
-    except requests.exceptions.RequestException as exc:
-        raise AdvisorError(f"Error de red al contactar Groq: {exc}") from exc
-
-    if resp.status_code == 401:
-        raise AdvisorError("API key de Groq inválida o expirada (HTTP 401).")
-    if resp.status_code >= 400:
-        raise AdvisorError(f"Groq respondió con error HTTP {resp.status_code}: {resp.text[:500]}")
-
-    try:
-        data = resp.json()
-        ids = sorted(m["id"] for m in data["data"])
-    except (KeyError, IndexError, ValueError, TypeError) as exc:
-        raise AdvisorError(f"Respuesta inesperada de Groq: {exc}") from exc
-    if not ids:
-        raise AdvisorError("Groq no devolvió ningún modelo disponible para esta API key.")
-    return ids
+    last_error: Optional[AdvisorError] = None
+    for model in models:
+        try:
+            return get_recommendations(summary, api_key, model, timeout=timeout)
+        except AdvisorError as exc:
+            last_error = exc
+            continue
+    raise AdvisorError(
+        f"Ningún modelo de la lista interna de Vortex (CANDIDATE_MODELS en "
+        f"vortex/gui/app.py) respondió. Último error: {last_error}"
+    )
 
 
 class _AdvisorWorker(QtCore.QObject):
     """Ejecuta la llamada (bloqueante, por red) a la API de Groq en un
-    hilo aparte para no congelar la interfaz."""
+    hilo aparte para no congelar la interfaz. El modelo lo elige el
+    sistema (ver `get_recommendations_auto`/`CANDIDATE_MODELS`) — nunca
+    se le pide al usuario que elija uno."""
 
     finished = QtCore.Signal(str)
     failed = QtCore.Signal(str)
 
-    def __init__(self, summary: str, api_key: str, model: str):
+    def __init__(self, summary: str, api_key: str):
         super().__init__()
         self._summary = summary
         self._api_key = api_key
-        self._model = model
 
     def run(self) -> None:
         try:
-            text = get_recommendations(self._summary, self._api_key, self._model)
+            text = get_recommendations_auto(self._summary, self._api_key)
             self.finished.emit(text)
         except AdvisorError as exc:
             self.failed.emit(str(exc))
         except Exception as exc:  # defensivo: nunca dejar el hilo morir en silencio
             self.failed.emit(f"Error inesperado consultando la IA: {exc}")
-
-
-class _ModelListWorker(QtCore.QObject):
-    """Consulta en un hilo aparte la lista real de modelos de Groq
-    disponibles para una API key dada."""
-
-    finished = QtCore.Signal(list)
-    failed = QtCore.Signal(str)
-
-    def __init__(self, api_key: str):
-        super().__init__()
-        self._api_key = api_key
-
-    def run(self) -> None:
-        try:
-            models = list_available_models(self._api_key)
-            self.finished.emit(models)
-        except AdvisorError as exc:
-            self.failed.emit(str(exc))
-        except Exception as exc:  # defensivo: nunca dejar el hilo morir en silencio
-            self.failed.emit(f"Error inesperado listando modelos: {exc}")
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -282,8 +259,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.last_inputs: Optional[PipelineInputs] = None
         self._ai_thread: Optional[QtCore.QThread] = None
         self._ai_worker: Optional[_AdvisorWorker] = None
-        self._models_thread: Optional[QtCore.QThread] = None
-        self._models_worker: Optional[_ModelListWorker] = None
 
         self._build_toolbar()
         self._build_ui()
@@ -588,21 +563,18 @@ class MainWindow(QtWidgets.QMainWindow):
         cfg_box = QtWidgets.QGroupBox("Configuración (Groq)")
         cfg_form = QtWidgets.QFormLayout(cfg_box)
 
-        model_row = QtWidgets.QHBoxLayout()
-        self.cb_ai_model = QtWidgets.QComboBox()
-        self.cb_ai_model.setEditable(True)
-        self.cb_ai_model.addItems(AVAILABLE_MODELS)
-        self.cb_ai_model.setCurrentText(DEFAULT_MODEL)
-        model_row.addWidget(self.cb_ai_model, 1)
-        self.btn_refresh_models = QtWidgets.QPushButton("🔄")
-        self.btn_refresh_models.setToolTip(
-            "Consultar en Groq la lista real de modelos disponibles para esta "
-            "API key (los nombres de modelo cambian con el tiempo; use esto "
-            "si un modelo da error \"model_not_found\")."
+        # El modelo lo elige el sistema (CANDIDATE_MODELS, arriba en este
+        # archivo): no hay selector ni lista para el usuario. Si un modelo
+        # deja de estar disponible, Vortex prueba el siguiente de la lista
+        # sin intervención del usuario — ver get_recommendations_auto().
+        model_note = QtWidgets.QLabel(
+            "El modelo de IA lo elige el sistema automáticamente "
+            "(vortex/gui/app.py, CANDIDATE_MODELS) — no hay nada que "
+            "configurar aquí."
         )
-        self.btn_refresh_models.clicked.connect(self.on_refresh_ai_models)
-        model_row.addWidget(self.btn_refresh_models)
-        cfg_form.addRow("Modelo", model_row)
+        model_note.setWordWrap(True)
+        model_note.setStyleSheet("color: #96a1ad; font-size: 10px;")
+        cfg_form.addRow(model_note)
 
         # La API key NO se pide ni se muestra en la interfaz: se configura
         # directamente en la constante GROQ_API_KEY al inicio de este mismo
@@ -1068,14 +1040,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return  # ya hay una consulta en curso
 
         api_key = _resolve_groq_api_key()
-        model = self.cb_ai_model.currentText().strip() or DEFAULT_MODEL
         summary = build_results_summary(self.model, self.pipeline_result, self.last_inputs)
 
         self.txt_ai_output.setPlainText("Consultando IA (Groq)...")
         self.btn_ai_recommend.setEnabled(False)
 
         self._ai_thread = QtCore.QThread(self)
-        self._ai_worker = _AdvisorWorker(summary, api_key, model)
+        self._ai_worker = _AdvisorWorker(summary, api_key)
         self._ai_worker.moveToThread(self._ai_thread)
         self._ai_thread.started.connect(self._ai_worker.run)
         self._ai_worker.finished.connect(self._on_ai_finished)
@@ -1105,45 +1076,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "https://console.groq.com/keys, o defina la variable de entorno "
             "GROQ_API_KEY."
         )
-
-    def on_refresh_ai_models(self) -> None:
-        if self._models_thread is not None and self._models_thread.isRunning():
-            return  # ya hay una consulta en curso
-        api_key = _resolve_groq_api_key()
-        if not api_key:
-            QtWidgets.QMessageBox.warning(
-                self, "Vortex",
-                "No hay una API key de Groq configurada. Edite la constante "
-                "GROQ_API_KEY al inicio de vortex/gui/app.py y vuelva a intentar."
-            )
-            return
-
-        self.btn_refresh_models.setEnabled(False)
-        self.status.showMessage("Consultando los modelos disponibles en Groq...")
-
-        self._models_thread = QtCore.QThread(self)
-        self._models_worker = _ModelListWorker(api_key)
-        self._models_worker.moveToThread(self._models_thread)
-        self._models_thread.started.connect(self._models_worker.run)
-        self._models_worker.finished.connect(self._on_models_listed)
-        self._models_worker.failed.connect(self._on_models_list_failed)
-        self._models_worker.finished.connect(self._models_thread.quit)
-        self._models_worker.failed.connect(self._models_thread.quit)
-        self._models_thread.finished.connect(self._models_thread.deleteLater)
-        self._models_thread.start()
-
-    def _on_models_listed(self, models: list) -> None:
-        current = self.cb_ai_model.currentText().strip()
-        self.cb_ai_model.clear()
-        self.cb_ai_model.addItems(models)
-        self.cb_ai_model.setCurrentText(current if current in models else models[0])
-        self.btn_refresh_models.setEnabled(True)
-        self.status.showMessage(f"{len(models)} modelo(s) disponibles en tu cuenta de Groq.")
-
-    def _on_models_list_failed(self, msg: str) -> None:
-        self.btn_refresh_models.setEnabled(True)
-        self.status.showMessage("No se pudo consultar la lista de modelos de Groq.")
-        QtWidgets.QMessageBox.warning(self, "Vortex", msg)
 
     def _show_error(self, title: str, exc: Exception) -> None:
         detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))

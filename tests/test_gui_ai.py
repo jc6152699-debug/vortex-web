@@ -1,10 +1,11 @@
 """
-Pruebas del asesor de IA (Groq), ahora vive dentro de `vortex.gui.app`
-(a pedido explícito: toda la configuración y el código de Groq quedan en
-ese único archivo, en vez de un paquete `vortex.ai` aparte). El resumen de
-resultados se construye sin red, y la llamada a la API de Groq se valida
-con `requests.post`/`requests.get` remplazados por un doble de prueba
-(sin salir a internet).
+Pruebas del asesor de IA (Groq), dentro de `vortex.gui.app` (a pedido
+explícito: toda la configuración y el código de Groq quedan en ese único
+archivo). El resumen de resultados se construye sin red, y la llamada a
+la API de Groq se valida con `requests.post` remplazado por un doble de
+prueba (sin salir a internet). El modelo lo elige el sistema
+(`get_recommendations_auto` prueba `CANDIDATE_MODELS` en orden) — no hay
+selector de modelo ni endpoint de listado expuesto al usuario.
 """
 import os
 import sys
@@ -74,7 +75,7 @@ def test_resolve_groq_api_key_falls_back_to_constant(gui_app, monkeypatch):
 
 def test_get_recommendations_without_api_key_raises(gui_app):
     with pytest.raises(gui_app.AdvisorError):
-        gui_app.get_recommendations("resumen de prueba", api_key="")
+        gui_app.get_recommendations("resumen de prueba", api_key="", model="cualquiera")
 
 
 def test_get_recommendations_success(gui_app, monkeypatch):
@@ -87,10 +88,11 @@ def test_get_recommendations_success(gui_app, monkeypatch):
     def _fake_post(url, headers=None, json=None, timeout=None):
         assert url == gui_app.GROQ_API_URL
         assert headers["Authorization"] == "Bearer test-key"
+        assert json["model"] == "modelo-x"
         return _FakeResponse()
 
     monkeypatch.setattr(gui_app.requests, "post", _fake_post)
-    text = gui_app.get_recommendations("resumen", api_key="test-key")
+    text = gui_app.get_recommendations("resumen", api_key="test-key", model="modelo-x")
     assert text == "Recomendación de prueba."
 
 
@@ -104,7 +106,7 @@ def test_get_recommendations_http_error(gui_app, monkeypatch):
 
     monkeypatch.setattr(gui_app.requests, "post", lambda *a, **k: _FakeResponse())
     with pytest.raises(gui_app.AdvisorError, match="inválida"):
-        gui_app.get_recommendations("resumen", api_key="bad-key")
+        gui_app.get_recommendations("resumen", api_key="bad-key", model="modelo-x")
 
 
 def test_get_recommendations_network_error(gui_app, monkeypatch):
@@ -115,10 +117,10 @@ def test_get_recommendations_network_error(gui_app, monkeypatch):
 
     monkeypatch.setattr(gui_app.requests, "post", _raise)
     with pytest.raises(gui_app.AdvisorError, match="red"):
-        gui_app.get_recommendations("resumen", api_key="test-key")
+        gui_app.get_recommendations("resumen", api_key="test-key", model="modelo-x")
 
 
-def test_get_recommendations_model_not_found_suggests_refresh(gui_app, monkeypatch):
+def test_get_recommendations_model_not_found(gui_app, monkeypatch):
     class _FakeResponse:
         status_code = 404
         text = '{"error": {"code": "model_not_found"}}'
@@ -127,37 +129,54 @@ def test_get_recommendations_model_not_found_suggests_refresh(gui_app, monkeypat
             return {"error": {"code": "model_not_found", "message": "no existe"}}
 
     monkeypatch.setattr(gui_app.requests, "post", lambda *a, **k: _FakeResponse())
-    with pytest.raises(gui_app.AdvisorError, match="🔄"):
+    with pytest.raises(gui_app.AdvisorError, match="model_not_found"):
         gui_app.get_recommendations("resumen", api_key="test-key", model="modelo-viejo")
 
 
-def test_list_available_models_without_key_raises(gui_app):
-    with pytest.raises(gui_app.AdvisorError):
-        gui_app.list_available_models(api_key="")
+def test_get_recommendations_auto_skips_models_that_dont_exist(gui_app, monkeypatch):
+    """El sistema elige el modelo: si el primer candidato no existe,
+    prueba el siguiente sin que el usuario tenga que hacer nada."""
+    calls = []
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(json["model"])
+
+        class _Resp:
+            def __init__(self, ok):
+                self.ok = ok
+                self.status_code = 200 if ok else 404
+                self.text = '' if ok else '{"error": {"code": "model_not_found"}}'
+
+            def json(self):
+                if self.ok:
+                    return {"choices": [{"message": {"content": "ok"}}]}
+                return {"error": {"code": "model_not_found"}}
+
+        return _Resp(ok=(json["model"] == "modelo-bueno"))
+
+    monkeypatch.setattr(gui_app.requests, "post", _fake_post)
+    text = gui_app.get_recommendations_auto(
+        "resumen", api_key="test-key", models=["modelo-malo-1", "modelo-malo-2", "modelo-bueno"],
+    )
+    assert text == "ok"
+    assert calls == ["modelo-malo-1", "modelo-malo-2", "modelo-bueno"]
 
 
-def test_list_available_models_success(gui_app, monkeypatch):
+def test_get_recommendations_auto_raises_when_all_models_fail(gui_app, monkeypatch):
     class _FakeResponse:
-        status_code = 200
+        status_code = 404
+        text = '{"error": {"code": "model_not_found"}}'
 
         def json(self):
-            return {"data": [{"id": "b-model"}, {"id": "a-model"}]}
+            return {"error": {"code": "model_not_found"}}
 
-    def _fake_get(url, headers=None, timeout=None):
-        assert url == gui_app.GROQ_MODELS_URL
-        assert headers["Authorization"] == "Bearer test-key"
-        return _FakeResponse()
-
-    monkeypatch.setattr(gui_app.requests, "get", _fake_get)
-    models = gui_app.list_available_models(api_key="test-key")
-    assert models == ["a-model", "b-model"]
+    monkeypatch.setattr(gui_app.requests, "post", lambda *a, **k: _FakeResponse())
+    with pytest.raises(gui_app.AdvisorError, match="Ningún modelo"):
+        gui_app.get_recommendations_auto(
+            "resumen", api_key="test-key", models=["modelo-malo-1", "modelo-malo-2"],
+        )
 
 
-def test_list_available_models_http_error(gui_app, monkeypatch):
-    class _FakeResponse:
-        status_code = 401
-        text = "unauthorized"
-
-    monkeypatch.setattr(gui_app.requests, "get", lambda *a, **k: _FakeResponse())
-    with pytest.raises(gui_app.AdvisorError, match="inválida"):
-        gui_app.list_available_models(api_key="bad-key")
+def test_get_recommendations_auto_without_api_key_raises(gui_app):
+    with pytest.raises(gui_app.AdvisorError):
+        gui_app.get_recommendations_auto("resumen", api_key="")

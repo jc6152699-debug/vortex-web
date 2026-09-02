@@ -220,12 +220,14 @@ Arriostramiento, Cargas, Sismo):
    o use en su lugar la variable de entorno `GROQ_API_KEY` (tiene
    prioridad sobre la constante y no queda escrita en ningún archivo).
 
-   Los nombres de modelo de Groq cambian con el tiempo y según la
-   cuenta — el valor por defecto (`DEFAULT_MODEL`, también en
-   `app.py`) puede dar un error "model_not_found" en cuentas donde ese
-   modelo puntual no esté habilitado; presione el botón **🔄** junto al
-   selector de modelo para listar los modelos realmente disponibles
-   para su API key y elegir uno de ahí.
+   **El modelo lo elige el sistema, no el usuario** — no hay selector
+   ni lista de modelos en la interfaz. `CANDIDATE_MODELS` (también en
+   `app.py`) trae varios modelos de chat de Groq conocidos, en orden de
+   preferencia; `get_recommendations_auto()` los prueba uno por uno y
+   usa el primero que responda. Si Groq retira o deshabilita un modelo
+   para su cuenta, Vortex simplemente prueba el siguiente de la lista
+   sin que el usuario vea ningún error intermedio — sólo se avisa si
+   *ninguno* de los modelos de la lista responde.
 
 **Ejemplo de línea de comandos** (reconstruye un caso de referencia y
 genera su memoria de cálculo):
