@@ -62,3 +62,37 @@ def test_main_window_build_analyze_export(qapp, tmp_path):
     out = tmp_path / "memoria.docx"
     generate_memoria(data, str(out))
     assert out.exists() and out.stat().st_size > 0
+
+
+def test_on_update_rebuilds_and_reanalyzes_in_one_step(qapp):
+    """"Actualizar" existe porque "Analizar" solo, sin reconstruir,
+    reutiliza el último modelo — si el usuario cambia geometría/secciones
+    y solo presiona "Analizar", el cambio no se refleja. Verifica que
+    "Actualizar" sí reconstruye con los valores actuales."""
+    from vortex.gui.app import MainWindow
+
+    win = MainWindow()
+    win.on_update()
+    assert win.model is not None
+    assert win.pipeline_result is not None
+    n_bays_before = win.model.n_bays
+
+    win.sp_bays.setValue(n_bays_before + 1)
+    win.on_update()
+    assert win.model.n_bays == n_bays_before + 1
+    assert win.pipeline_result is not None
+
+
+def test_on_clear_resets_model_but_keeps_form_values(qapp):
+    from vortex.gui.app import MainWindow
+
+    win = MainWindow()
+    win.on_update()
+    assert win.model is not None
+    bays_value = win.sp_bays.value()
+
+    win.on_clear()
+    assert win.model is None
+    assert win.pipeline_result is None
+    assert win.results_table.rowCount() == 0
+    assert win.sp_bays.value() == bays_value  # el formulario no se toca

@@ -147,6 +147,16 @@ Arriostramiento, Cargas, Sismo):
 3. **Analizar y verificar** → corre el análisis matricial completo y
    colorea cada elemento según su relación demanda/capacidad (verde =
    holgado, amarillo = ajustado ≥0.9, rojo = no cumple >1.0).
+   **Analizar reutiliza el último modelo construido** — si cambia una
+   sección, la geometría, el arriostramiento, etc. sin volver a
+   presionar "Construir modelo", el resultado NO reflejará ese cambio.
+   Para evitar ese olvido, use en cambio:
+   - **🔄 Actualizar** → reconstruye el modelo con los valores actuales
+     del formulario y vuelve a analizar, en un solo clic — el atajo
+     recomendado siempre que se cambie cualquier dato.
+   - **🗑 Borrar** → limpia el modelo, los resultados, el visor 3D y las
+     recomendaciones de IA para empezar de nuevo; los valores ya
+     diligenciados en el formulario NO se borran.
 4. **Exportar memoria de cálculo** → guarda el reporte `.docx`.
 5. **Cargas y sismo** (pestaña junto a "Resultados") → resumen calculado
    de la carga de producto (PL) y la carga viva (LL) — ambas por nivel y
@@ -177,18 +187,28 @@ Arriostramiento, Cargas, Sismo):
    y conexión a internet; es una ayuda de lectura rápida de resultados,
    **no** un chequeo normativo ni un sustituto del criterio del calculista.
 
-   **La API key nunca se pide ni se muestra en la interfaz.** Se
-   configura directamente en el código: edita
-   `vortex/ai/local_config.py` (si clonaste con git, copia primero
-   `local_config.example.py` con ese nombre) y pega tu key entre las
-   comillas de `GROQ_API_KEY = "..."` — ese archivo está en
-   `.gitignore`, así que nunca se sube al repositorio. También puede
-   definirse como variable de entorno `GROQ_API_KEY` (tiene prioridad
-   sobre el archivo). Los nombres de modelo de Groq cambian con el
-   tiempo y según la cuenta; si el modelo por defecto da un error
-   "model_not_found", presione el botón **🔄** junto al selector de
-   modelo para listar los modelos realmente disponibles para esa API
-   key y elegir uno de ahí.
+   **La API key nunca se pide ni se muestra en la interfaz — todo el
+   código y la configuración de Groq viven en `vortex/gui/app.py`, a
+   propósito, en un solo archivo.** Para configurarla, abra
+   `vortex/gui/app.py` y edite la constante cerca del inicio del
+   archivo:
+
+   ```python
+   GROQ_API_KEY = "gsk_TU_LLAVE_AQUI"
+   ```
+
+   ⚠️ Como esa constante queda en un archivo normal del proyecto, si
+   sube o comparte este repositorio (por ejemplo a un repositorio Git
+   propio) su key quedaría en el código — quítela antes de compartirlo,
+   o use en su lugar la variable de entorno `GROQ_API_KEY` (tiene
+   prioridad sobre la constante y no queda escrita en ningún archivo).
+
+   Los nombres de modelo de Groq cambian con el tiempo y según la
+   cuenta — el valor por defecto (`DEFAULT_MODEL`, también en
+   `app.py`) puede dar un error "model_not_found" en cuentas donde ese
+   modelo puntual no esté habilitado; presione el botón **🔄** junto al
+   selector de modelo para listar los modelos realmente disponibles
+   para su API key y elegir uno de ahí.
 
 **Ejemplo de línea de comandos** (reconstruye un caso de referencia y
 genera su memoria de cálculo):
@@ -213,8 +233,8 @@ vortex/
   analysis/   elemento de pórtico 3D, condensación de conexiones, ensamblaje y solución
   design/     verificación de parales, vigas, placas base/anclajes, diagonales
   report/     generador de memoria de cálculo (.docx)
-  gui/        aplicación de escritorio (PySide6 + visor 3D + tema visual)
-  ai/         asesor de IA (Groq) para recomendaciones sobre los resultados
+  gui/        aplicación de escritorio (PySide6 + visor 3D + tema visual +
+              asesor de IA vía Groq, todo en gui/app.py)
 tests/        pruebas unitarias y de validación
 examples/     ejemplo de extremo a extremo
 ```
