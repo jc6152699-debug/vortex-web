@@ -19,6 +19,7 @@ from ..loads.combinations import lrfd_combinations, LoadCase, Combination
 from ..loads import seismic as sm
 from ..design.upright_cfs import check_upright_compression_bending, UprightCheckResult
 from ..design.beam import check_beam, check_deflection, BeamCheckResult, beam_moment_at, beam_shear_at
+from ..design.connections import check_brace, BraceCheckResult
 from .solve import analyze, AnalysisResult, MemberLoad, NodalLoad
 
 
@@ -62,6 +63,7 @@ class MemberResultRow:
     length_m: float = 0.0       # m, longitud del elemento (columna "H[m]" del anexo)
     upright_check: Optional[UprightCheckResult] = None   # resultado completo (parales)
     beam_check: Optional[BeamCheckResult] = None            # resultado completo (vigas)
+    brace_check: Optional[BraceCheckResult] = None            # resultado completo (diagonales/travesaños)
 
 
 @dataclass
@@ -291,6 +293,44 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
             combo=combo_gravity.label(), ratio=r.ratio,
             detail=f"M={r.Mmax:.2f}kN·m, δ={r.deflection_max * 1000:.1f}mm (lim L/{180:.0f})",
             raw_force=r.Mmax, length_m=model.bay_length, beam_check=r,
+        )
+
+    # Diagonales de arriostramiento y travesaños (elementos de dos fuerzas,
+    # extremos articulados: axial puro, N_i == N_j sin carga distribuida
+    # aplicada). Antes NO se verificaban en absoluto — se modelaban para
+    # la rigidez del análisis matricial pero nunca se comprobaba su propia
+    # resistencia (tracción/pandeo), pese a que `design.connections.
+    # check_brace` ya existía para eso: quedaba como código muerto, sin
+    # usar. Son justamente los elementos que resisten el cortante sísmico
+    # transversal (marco arriostrado, R=4 — numeral 2.7.3), así que
+    # dejarlos sin chequear era una omisión seria, no cosmética.
+    for member in model.members_of_kind(MemberKind.BRACE):
+        best_ratio, best_combo, best_detail, best_n, best_r = -1.0, "", "", 0.0, None
+        L = model.member_length(member)
+        KL = inputs.k_trans * L
+        for combo, el_pattern in ((combo_gravity, None), (combo_seismic, "EL_X"), (combo_seismic, "EL_Y")):
+            f_dl = combo.factors.get(LoadCase.DL, 0.0)
+            f_pl = combo.factors.get(LoadCase.PL, 0.0)
+            f_ll = combo.factors.get(LoadCase.LL, 0.0)
+            f_el = combo.factors.get(LoadCase.EL, 0.0)
+            mf_dl = patterns["DL"].member_forces[member.id]
+            mf_pl = patterns["PL"].member_forces[member.id]
+            mf_ll = patterns["LL"].member_forces[member.id]
+            N = f_dl * mf_dl.P_i + f_pl * mf_pl.P_i + f_ll * mf_ll.P_i
+            if el_pattern is not None:
+                mf_el = patterns[el_pattern].member_forces[member.id]
+                N += f_el * mf_el.P_i
+            r = check_brace(member.section, combo.id, N=N, KL=KL)
+            if r.ratio > best_ratio:
+                best_ratio, best_combo, best_n, best_r = r.ratio, combo.label(), N, r
+                best_detail = (
+                    f"N={N:.2f}/{r.capacity:.2f}kN "
+                    f"({'tracción' if N >= 0 else 'compresión'}, KL/r={r.slenderness:.0f})"
+                )
+        result.member_rows[member.id] = MemberResultRow(
+            member_id=member.id, label=member.label, kind="Diagonal",
+            combo=best_combo, ratio=best_ratio, detail=best_detail, raw_force=abs(best_n),
+            length_m=L, brace_check=best_r,
         )
 
     return result

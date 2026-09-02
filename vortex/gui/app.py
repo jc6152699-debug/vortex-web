@@ -327,27 +327,20 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         act_toggle_ai.triggered.connect(self._on_ai_toolbar_clicked)
 
+        # Los controles de "Vista" (líneas de fuerzas del visor 3D y
+        # encuadre/zoom) viven DENTRO de "Más herramientas" — a pedido
+        # explícito del usuario ya no tienen su propio botón desplegable
+        # en la barra. Al ser un QWidgetAction dentro del mismo QMenu, el
+        # usuario interactúa con los controles reales sin que el menú se
+        # cierre en cada clic.
+        menu_tools.addSeparator()
+        view_panel = self._build_view_menu_panel()
+        act_view_panel = QtWidgets.QWidgetAction(menu_tools)
+        act_view_panel.setDefaultWidget(view_panel)
+        menu_tools.addAction(act_view_panel)
+
         self.btn_tools.setMenu(menu_tools)
         toolbar.addWidget(self.btn_tools)
-
-        # "Vista" — segundo desplegable, justo al lado de "Más
-        # herramientas": agrupa los controles de uso ocasional del visor
-        # 3D (líneas de fuerzas y encuadre/zoom) que antes ocupaban una
-        # fila fija debajo del visor. Al ser un QWidgetAction dentro de un
-        # QMenu, el usuario interactúa con los controles reales sin que
-        # el menú se cierre en cada clic (mismo patrón que un panel de
-        # "Vista" de un programa CAD profesional).
-        self.btn_view = QtWidgets.QToolButton()
-        self.btn_view.setText("👁  Vista ▾")
-        self.btn_view.setPopupMode(QtWidgets.QToolButton.InstantPopup)
-        self.btn_view.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
-        menu_view = QtWidgets.QMenu(self.btn_view)
-        view_panel = self._build_view_menu_panel()
-        act_view_panel = QtWidgets.QWidgetAction(menu_view)
-        act_view_panel.setDefaultWidget(view_panel)
-        menu_view.addAction(act_view_panel)
-        self.btn_view.setMenu(menu_view)
-        toolbar.addWidget(self.btn_view)
 
         toolbar.addSeparator()
 
@@ -398,9 +391,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_view_menu_panel(self) -> QtWidgets.QWidget:
         """
-        Panel embebido en el desplegable "👁 Vista" de la barra de
-        herramientas: controles de "Líneas de fuerzas" (antes fijos
-        debajo del visor 3D) + el nuevo control de "Encuadre" (zoom/ajuste
+        Panel embebido dentro del desplegable "🗂 Más herramientas" de la
+        barra de herramientas: controles de "Líneas de fuerzas" (antes
+        fijos debajo del visor 3D) + el control de "Encuadre" (zoom/ajuste
         de la vista al tamaño del estante). Los widgets creados aquí
         (`self.chk_show_diagram`, etc.) son los MISMOS objetos que usa el
         resto de la clase (`_on_diagram_changed`, `on_build_model`, ...) —
@@ -518,12 +511,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # NOTA: los controles de "Líneas de fuerzas" (patrón/componente/
         # escala) y de encuadre del visor 3D ya NO viven aquí debajo del
-        # visor — se movieron al menú desplegable "👁 Vista" de la barra
-        # de herramientas (ver `_build_toolbar`), para no ocupar espacio
-        # permanente con controles de uso ocasional (patrón profesional
-        # de "panel de vista" tipo Inventor/SolidWorks). Los widgets
-        # (`self.chk_show_diagram`, etc.) se siguen creando en
-        # `_build_view_menu_panel` y funcionan exactamente igual.
+        # visor — se movieron dentro del menú desplegable "🗂 Más
+        # herramientas" de la barra de herramientas (ver `_build_toolbar`),
+        # para no ocupar espacio permanente con controles de uso ocasional
+        # ni un botón de barra aparte. Los widgets (`self.chk_show_diagram`,
+        # etc.) se siguen creando en `_build_view_menu_panel` y funcionan
+        # exactamente igual.
 
         viewer_container.setMinimumHeight(160)
         right.addWidget(viewer_container)

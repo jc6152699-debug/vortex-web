@@ -35,8 +35,12 @@ def test_main_window_build_analyze_export(qapp, tmp_path):
 
     win.on_analyze()
     assert win.pipeline_result is not None
+    # Parales, vigas Y diagonales/travesaños (BRACE): antes las diagonales
+    # se modelaban para la rigidez del análisis pero nunca se verificaban
+    # (código muerto en `design.connections.check_brace`) — ahora también
+    # tienen su propia fila de resultado.
     assert len(win.pipeline_result.member_rows) == len(
-        [m for m in win.model.members.values() if m.kind.name in ("UPRIGHT", "BEAM")]
+        [m for m in win.model.members.values() if m.kind.name in ("UPRIGHT", "BEAM", "BRACE")]
     )
     assert win.results_table.rowCount() == len(win.pipeline_result.member_rows)
 

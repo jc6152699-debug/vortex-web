@@ -50,20 +50,20 @@ def test_toolbar_starts_with_tools_dropdown_button(qapp):
     assert first_widget is win.btn_tools
 
 
-def test_view_dropdown_is_second_and_next_to_tools(qapp):
+def test_no_standalone_view_dropdown_button(qapp):
+    """"Vista" NO debe tener su propio botón desplegable en la barra — a
+    pedido explícito del usuario, sus controles (líneas de fuerzas,
+    encuadre) quedaron dentro de "Más herramientas" (ver
+    `test_tools_dropdown_menu_has_view_controls`)."""
     from vortex.gui.app import MainWindow
 
     win = MainWindow()
+    assert not hasattr(win, "btn_view")
     buttons = _toolbar_buttons(win)
     labels = [b.text() for b in buttons]
     assert any("Más herramientas" in l for l in labels)
-    assert any("Vista" in l for l in labels)
     assert any("Diagramas y especificaciones" in l for l in labels)
-    # "Vista" debe quedar justo después de "Más herramientas" (mismo grupo
-    # de la izquierda), no al final de la barra.
-    idx_tools = next(i for i, l in enumerate(labels) if "Más herramientas" in l)
-    idx_view = next(i for i, l in enumerate(labels) if "Vista" in l)
-    assert idx_view == idx_tools + 1
+    assert not any("Vista" in l for l in labels)
 
 
 def test_tools_dropdown_menu_has_expected_actions(qapp):
@@ -94,16 +94,18 @@ def test_tools_dropdown_build_action_runs_handler(qapp):
     assert win.model is not None
 
 
-def test_view_dropdown_has_force_lines_and_fit_view_controls(qapp):
+def test_tools_dropdown_menu_has_view_controls(qapp):
+    """Los controles de "Vista" (líneas de fuerzas, encuadre) viven dentro
+    del menú "Más herramientas" como un panel embebido (QWidgetAction),
+    no en un botón desplegable propio."""
     from vortex.gui.app import MainWindow
     from PySide6 import QtWidgets
 
     win = MainWindow()
-    menu = win.btn_view.menu()
-    assert menu is not None
-    actions = menu.actions()
-    assert len(actions) == 1
-    panel = actions[0].defaultWidget()
+    menu = win.btn_tools.menu()
+    widget_actions = [a for a in menu.actions() if isinstance(a, QtWidgets.QWidgetAction)]
+    assert len(widget_actions) == 1
+    panel = widget_actions[0].defaultWidget()
     assert panel is not None
 
     # Los controles existen y son los mismos objetos que usa el resto de
