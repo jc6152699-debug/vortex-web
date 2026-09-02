@@ -120,18 +120,35 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
     ]
     height_total = model.level_elevations[-1] if model.level_elevations else 0.0
 
+    # Ws/V (numeral 1.1.3 de la memoria) son el peso sísmico y el cortante
+    # de BASE de TODA la estantería, así que deben construirse con los
+    # totales de TODO el rack (todos los niveles): dl_total (no
+    # dl_per_level, que es sólo la fracción de UN nivel) y pl_total/ll_total
+    # multiplicados por n_levels (pl_total/ll_total, tal como se definen
+    # arriba, son el total de UN solo nivel repartido en todas las bahías).
+    # `levels_w`, en cambio, sí debe seguir usando el peso de UN nivel
+    # (dl_per_level, pl_total, ll_total) porque sólo sirve para repartir V
+    # proporcionalmente entre niveles según su peso relativo — y por
+    # construcción la suma de esos pesos por nivel (n_levels veces el peso
+    # de un nivel, ya que aquí son iguales) debe coincidir con Ws_total,
+    # o la distribución vertical quedaría inconsistente con el cortante de
+    # base que se está distribuyendo (antes Ws_total == el peso de UN solo
+    # nivel, es decir ~1/n_levels del real, subestimando V y por tanto las
+    # fuerzas sísmicas aplicadas al modelo en la misma proporción).
+    pl_all_levels = pl_total * n_levels
+    ll_all_levels = ll_total * n_levels
     seis_trans = sm.compute_seismic(
         direction=sm.SeismicDirection.TRANSVERSAL,
         soil_type=inputs.seismic.soil_type, aa=inputs.seismic.aa, av=inputs.seismic.av,
-        pl=pl_total, dl=dl_per_level, ll=ll_total, height_m=height_total, levels=levels_w,
+        pl=pl_all_levels, dl=dl_total, ll=ll_all_levels, height_m=height_total, levels=levels_w,
         essential=inputs.seismic.essential, hazardous_contents=inputs.seismic.hazardous_contents,
         public_access=inputs.seismic.public_access,
     )
     seis_long = sm.compute_seismic(
         direction=sm.SeismicDirection.LONGITUDINAL,
         soil_type=inputs.seismic.soil_type, aa=inputs.seismic.aa, av=inputs.seismic.av,
-        pl=pl_total, dl=dl_per_level, ll=ll_total, height_m=height_total, levels=levels_w,
-        pl_promedio=inputs.seismic.pl_promedio_ratio * pl_total, pl_maxima=pl_total,
+        pl=pl_all_levels, dl=dl_total, ll=ll_all_levels, height_m=height_total, levels=levels_w,
+        pl_promedio=inputs.seismic.pl_promedio_ratio * pl_all_levels, pl_maxima=pl_all_levels,
         essential=inputs.seismic.essential, hazardous_contents=inputs.seismic.hazardous_contents,
         public_access=inputs.seismic.public_access,
     )
@@ -178,31 +195,55 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
             mf_dl = patterns["DL"].member_forces[member.id]
             mf_pl = patterns["PL"].member_forces[member.id]
             mf_ll = patterns["LL"].member_forces[member.id]
-            P = f_dl * mf_dl.P_i + f_pl * mf_pl.P_i + f_ll * mf_ll.P_i
-            M2 = f_dl * mf_dl.M2_i + f_pl * mf_pl.M2_i + f_ll * mf_ll.M2_i
-            M3 = f_dl * mf_dl.M3_i + f_pl * mf_pl.M3_i + f_ll * mf_ll.M3_i
-            V2 = f_dl * mf_dl.V2_i + f_pl * mf_pl.V2_i + f_ll * mf_ll.V2_i
-            V3 = f_dl * mf_dl.V3_i + f_pl * mf_pl.V3_i + f_ll * mf_ll.V3_i
-            if el_pattern is not None:
-                mf_el = patterns[el_pattern].member_forces[member.id]
-                P += f_el * mf_el.P_i
-                M2 += f_el * mf_el.M2_i
-                M3 += f_el * mf_el.M3_i
-                V2 += f_el * mf_el.V2_i
-                V3 += f_el * mf_el.V3_i
+            mf_el = patterns[el_pattern].member_forces[member.id] if el_pattern is not None else None
+
             L = model.member_length(member)
             KLy = inputs.k_long * L
             KLz = inputs.k_trans * L
-            r = check_upright_compression_bending(
-                member.section, combo.id, P=abs(P), M2=abs(M2), M3=abs(M3),
-                V2=abs(V2), V3=abs(V3), KLy=KLy, KLz=KLz,
-            )
-            if r.ratio > best_ratio:
-                best_ratio, best_combo, best_p, best_r = r.ratio, combo.label(), abs(P), r
-                best_detail = (
-                    f"P={abs(P):.1f}/{r.Pa:.1f}kN, M2={abs(M2):.2f}/{r.Ma2:.2f}, "
-                    f"M3={abs(M3):.2f}/{r.Ma3:.2f}kN·m, V={max(abs(V2),abs(V3)):.1f}/{r.Va:.1f}kN"
+
+            # Un paral no tiene carga transversal distribuida (el peso
+            # propio actúa en el eje axial), así que P, M2, M3, V2, V3
+            # varían linealmente entre los dos extremos del elemento y el
+            # máximo puede estar en CUALQUIERA de los dos — con conexiones
+            # semirrígidas viga-paral en cada nivel, el extremo superior
+            # ("_j") suele tener momentos tan grandes o mayores que el
+            # inferior ("_i"). Evaluar sólo "_i" (como se hacía antes)
+            # subestima la demanda real en muchos parales y es la causa de
+            # que el chequeo de la sección 5 no coincidiera con lo que se
+            # ve en la tabla "Element Forces - Frames" (que sí reporta
+            # ambos extremos): se verifican los dos extremos y se reporta
+            # el que gobierne, igual que ya se hace para vigas (ver
+            # `design.beam.moment_envelope`, que también barre todo el
+            # tramo en vez de mirar un único punto).
+            for suffix in ("_i", "_j"):
+                P = (f_dl * getattr(mf_dl, "P" + suffix) + f_pl * getattr(mf_pl, "P" + suffix)
+                     + f_ll * getattr(mf_ll, "P" + suffix))
+                M2 = (f_dl * getattr(mf_dl, "M2" + suffix) + f_pl * getattr(mf_pl, "M2" + suffix)
+                      + f_ll * getattr(mf_ll, "M2" + suffix))
+                M3 = (f_dl * getattr(mf_dl, "M3" + suffix) + f_pl * getattr(mf_pl, "M3" + suffix)
+                      + f_ll * getattr(mf_ll, "M3" + suffix))
+                V2 = (f_dl * getattr(mf_dl, "V2" + suffix) + f_pl * getattr(mf_pl, "V2" + suffix)
+                      + f_ll * getattr(mf_ll, "V2" + suffix))
+                V3 = (f_dl * getattr(mf_dl, "V3" + suffix) + f_pl * getattr(mf_pl, "V3" + suffix)
+                      + f_ll * getattr(mf_ll, "V3" + suffix))
+                if mf_el is not None:
+                    P += f_el * getattr(mf_el, "P" + suffix)
+                    M2 += f_el * getattr(mf_el, "M2" + suffix)
+                    M3 += f_el * getattr(mf_el, "M3" + suffix)
+                    V2 += f_el * getattr(mf_el, "V2" + suffix)
+                    V3 += f_el * getattr(mf_el, "V3" + suffix)
+
+                r = check_upright_compression_bending(
+                    member.section, combo.id, P=abs(P), M2=abs(M2), M3=abs(M3),
+                    V2=abs(V2), V3=abs(V3), KLy=KLy, KLz=KLz,
                 )
+                if r.ratio > best_ratio:
+                    best_ratio, best_combo, best_p, best_r = r.ratio, combo.label(), abs(P), r
+                    best_detail = (
+                        f"P={abs(P):.1f}/{r.Pa:.1f}kN, M2={abs(M2):.2f}/{r.Ma2:.2f}, "
+                        f"M3={abs(M3):.2f}/{r.Ma3:.2f}kN·m, V={max(abs(V2),abs(V3)):.1f}/{r.Va:.1f}kN"
+                        f" (extremo {'i' if suffix == '_i' else 'j'})"
+                    )
         result.member_rows[member.id] = MemberResultRow(
             member_id=member.id, label=member.label, kind="Paral",
             combo=best_combo, ratio=best_ratio, detail=best_detail, raw_force=best_p,

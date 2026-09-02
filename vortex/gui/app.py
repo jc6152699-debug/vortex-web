@@ -24,7 +24,6 @@ from ..geometry import (
 from ..geometry.model import RackModel, SectionKind
 from ..sections.catalog import default_catalog
 from ..loads.seismic import AA_AV_BY_CITY
-from ..loads.dead_live import LIVE_LOAD_PRESETS_KN_M2
 from ..analysis import (
     PipelineInputs, PipelineResult, SeismicInputs, run_full_check,
     element_forces_table, write_element_forces_csv,
@@ -676,25 +675,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sp_pl.setValue(2400.0); self.sp_pl.setSuffix(" kgf / nivel-bahía")
         load_form.addRow("Carga de producto (PL)", self.sp_pl)
 
-        self.cb_ll_preset = QtWidgets.QComboBox()
-        for label in LIVE_LOAD_PRESETS_KN_M2:
-            self.cb_ll_preset.addItem(label)
-        self.cb_ll_preset.addItem("Manual (ingresar valor)")
-        self.cb_ll_preset.currentTextChanged.connect(self._on_ll_preset_changed)
-        load_form.addRow("Origen de la carga viva (LL)", self.cb_ll_preset)
-
         self.sp_ll = QtWidgets.QDoubleSpinBox(); self.sp_ll.setRange(0, 50)
         self.sp_ll.setValue(0.0); self.sp_ll.setSuffix(" kN/m²")
-        self.sp_ll.setEnabled(False)
-        load_form.addRow("Carga viva (LL) calculada", self.sp_ll)
-        self._on_ll_preset_changed(self.cb_ll_preset.currentText())
+        load_form.addRow("Carga viva (LL)", self.sp_ll)
 
         ll_hint = QtWidgets.QLabel(
-            "Valores de referencia NSR-10 Título B, Tabla B.4.2.1-1 (cargas "
-            "vivas mínimas). Solo aplica si la estantería tiene una "
-            "plataforma o entrepiso transitable — verifique la edición "
-            "vigente de la norma antes de un diseño definitivo. Elija "
-            "\"Manual\" para escribir un valor propio."
+            "LL = carga viva distinta a la de estibas/producto (numeral "
+            "2.1 NTC 5689); sólo aplica si la estantería tiene una "
+            "plataforma o entrepiso transitable — la mayoría de "
+            "estanterías selectivas sin entrepiso NO tienen esta carga "
+            "(LL=0). Si aplica, use el valor de la norma de cargas de "
+            "edificaciones vigente para la ocupación real del proyecto "
+            "(en Colombia, NSR-10 Título B)."
         )
         ll_hint.setWordWrap(True)
         ll_hint.setStyleSheet("color: #96a1ad; font-size: 10px;")
@@ -743,18 +735,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if data:
             self.sp_aa.setValue(float(data["Aa"]))
             self.sp_av.setValue(float(data["Av"]))
-
-    def _on_ll_preset_changed(self, label: str) -> None:
-        """Autocompleta la carga viva (LL) a partir de la ocupación
-        elegida (valores de referencia NSR-10 Título B), igual que Aa/Av
-        se autocompletan al elegir la ciudad. "Manual" deja el campo
-        editable para un valor propio."""
-        value = LIVE_LOAD_PRESETS_KN_M2.get(label)
-        if value is not None:
-            self.sp_ll.setValue(value)
-            self.sp_ll.setEnabled(False)
-        else:
-            self.sp_ll.setEnabled(True)
 
     def _current_level_heights(self) -> list:
         n_levels = self.sp_n_levels.value()
@@ -993,6 +973,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 method_name="LRFD", combos=self.pipeline_result.combos,
                 design_rows=design_rows,
                 member_rows_detail=list(self.pipeline_result.member_rows.values()),
+                ai_analysis=self.txt_ai_output.toPlainText(),
             )
             generate_memoria(data, path)
             self.status.showMessage(f"Memoria de cálculo exportada: {path}")

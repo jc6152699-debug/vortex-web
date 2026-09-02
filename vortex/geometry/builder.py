@@ -27,6 +27,17 @@ from .model import (
 # el valor de ensayo antes de emitir una memoria de cálculo definitiva.
 DEFAULT_BEAM_CONNECTION_KM = 60.0  # kN*m/rad
 
+# Código de una letra para cada lado del marco, usado en las etiquetas de
+# nudos y elementos (p.ej. "VIGA B0-F N3"). NO se puede derivar tomando la
+# primera letra de "frente"/"fondo" (side[0].upper()): ambas palabras
+# empiezan por "F" en español, así que esa fórmula generaba la MISMA
+# etiqueta para dos elementos físicos distintos (el paral/viga del frente y
+# el del fondo de cada marco quedaban ambos como "...-F..."), haciendo
+# imposible distinguirlos en la memoria de cálculo — p.ej. "PARAL M0-F
+# N0-N1" aparecía dos veces, una por cada elemento real. "fondo" (parte
+# posterior del marco, en la fila de atrás) usa código "P" (posterior).
+SIDE_CODE = {"frente": "F", "fondo": "P"}
+
 
 @dataclass
 class RackParameters:
@@ -152,7 +163,7 @@ def build_selective_rack(p: RackParameters) -> RackModel:
                     id=nid,
                     x=x, y=y, z=z,
                     restraints=restraints,
-                    label=f"M{f}-{side[0].upper()}-N{lv}",
+                    label=f"M{f}-{SIDE_CODE[side]}-N{lv}",
                 )
                 model.add_node(node)
                 node_id_of[(f, side, lv)] = nid
@@ -174,7 +185,7 @@ def build_selective_rack(p: RackParameters) -> RackModel:
                     release_i_Mz=ConnectionRelease.rigid(),
                     release_j_My=ConnectionRelease.rigid(),
                     release_j_Mz=ConnectionRelease.rigid(),
-                    label=f"PARAL M{f}-{side[0].upper()} N{lv}-N{lv+1}",
+                    label=f"PARAL M{f}-{SIDE_CODE[side]} N{lv}-N{lv+1}",
                     frame_index=f, level_index=lv, side=side,
                 )
                 model.add_member(m)
@@ -199,7 +210,7 @@ def build_selective_rack(p: RackParameters) -> RackModel:
                     release_i_Mz=ConnectionRelease.pinned(),
                     release_j_My=beam_release,
                     release_j_Mz=ConnectionRelease.pinned(),
-                    label=f"VIGA B{b}-{side[0].upper()} N{lv}",
+                    label=f"VIGA B{b}-{SIDE_CODE[side]} N{lv}",
                     bay_index=b, level_index=lv, side=side,
                 )
                 model.add_member(m)

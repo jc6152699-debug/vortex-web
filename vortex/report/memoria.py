@@ -58,6 +58,12 @@ class ReportData:
     # `analysis`.
     member_rows_detail: List[Any] = field(default_factory=list)
     disclaimer_extra: str = ""
+    # Texto de las recomendaciones del asesor de IA (Groq) ya consultado
+    # desde la GUI (ver `vortex.gui.app.get_recommendations_auto`), para
+    # incluirlo como sección de la memoria (numeral 7). Vacío si el
+    # usuario no consultó la IA antes de exportar — en ese caso la sección
+    # se genera igual, con una nota indicándolo (ver `_add_ai_analysis`).
+    ai_analysis: str = ""
 
 
 def _add_title_page(doc: Document, data: ReportData) -> None:
@@ -126,7 +132,9 @@ def _add_toc(doc: Document) -> None:
         "3. Definición del sistema estructural",
         "4. Datos de entrada",
         "5. Esfuerzos y verificación de elementos",
-        "6. Conclusiones",
+        "6. Índice de elementos (referencia rápida)",
+        "7. Análisis asistido por IA",
+        "8. Conclusiones",
     ]
     for it in items:
         doc.add_paragraph(it, style="List Bullet")
@@ -383,33 +391,142 @@ def _add_resistencia_chequeo_tables(doc: Document, data: ReportData) -> None:
         cells[6].text = f"{c.V3:.3f}"
 
     doc.add_heading("CHEQUEO", level=2)
-    t2 = doc.add_table(rows=1, cols=6)
+    doc.add_paragraph(
+        "Las columnas P, Mx, Vy, My y Vx comparan cada componente de forma "
+        "INDEPENDIENTE contra su propia capacidad admisible (Pa, Ma3, Va, "
+        "Ma2, Va) — son un diagnóstico rápido de qué acción es más "
+        "exigente, pero NO son el chequeo de diseño real de un elemento a "
+        "flexo-compresión: un paral puede tener sus 5 componentes por "
+        "separado por debajo de 1.0 y aun así NO CUMPLIR, porque la "
+        "interacción P/Pa + M2/Ma2 + M3/Ma3 (con amplificación por efectos "
+        "de segundo orden) puede superar 1.0 aunque ningún término lo haga "
+        "por sí solo. La columna \"Interacción\" es la que gobierna el "
+        "resultado ESTADO de la sección 5 de esta memoria; si difiere de "
+        "\"OK\" en todos los componentes individuales, es precisamente por "
+        "ese efecto de interacción y NO es una inconsistencia del cálculo."
+    )
+    t2 = doc.add_table(rows=1, cols=8)
     t2.style = "Light Grid Accent 1"
-    for i, h in enumerate(["ITEM", "P [KN]", "Mx [KN-m]", "Vy [KN]", "My [KN-m]", "Vx [KN]"]):
+    headers2 = ["ITEM", "P [KN]", "Mx [KN-m]", "Vy [KN]", "My [KN-m]", "Vx [KN]", "Interacción", "ESTADO"]
+    for i, h in enumerate(headers2):
         t2.rows[0].cells[i].text = h
-    n_fail = 0
+    n_fail_component = 0
+    n_fail_interaction = 0
     for item, row in enumerate(rows, start=1):
-        checks = row.upright_check.component_checks
+        c = row.upright_check
+        checks = c.component_checks
         vals = [checks["P"], checks["M3"], checks["V2"], checks["M2"], checks["V3"]]
         if not all(vals):
-            n_fail += 1
+            n_fail_component += 1
+        governing_fail = c.ratio_interaction > 1.0
+        if governing_fail:
+            n_fail_interaction += 1
         cells = t2.add_row().cells
         cells[0].text = str(item)
         for i, ok in enumerate(vals, start=1):
             cells[i].text = "OK" if ok else "NO CUMPLE"
+        cells[6].text = f"{c.ratio_interaction:.2f}"
+        cells[7].text = "NO CUMPLE" if governing_fail else "OK"
     doc.add_paragraph()
-    if n_fail:
+    if n_fail_interaction:
         p = doc.add_paragraph()
         p.add_run(
-            f"{n_fail} de {len(rows)} parales tienen al menos un componente "
-            f"(P, Mx, Vy, My o Vx) que NO CUMPLE de forma individual."
+            f"{n_fail_interaction} de {len(rows)} parales NO CUMPLEN la interacción "
+            f"P/Pa + M2/Ma2 + M3/Ma3 (columna \"Interacción\", ratio > 1.0) — este es "
+            f"el resultado gobernante, coherente con la sección 5. Además, "
+            f"{n_fail_component} de {len(rows)} tienen al menos un componente "
+            f"individual (P, Mx, Vy, My o Vx) que por sí solo ya excede su "
+            f"capacidad admisible."
         ).bold = True
     else:
-        doc.add_paragraph(f"Los {len(rows)} parales cumplen en todos sus componentes.")
+        doc.add_paragraph(
+            f"Los {len(rows)} parales cumplen tanto en la interacción P/Pa+M2/Ma2+"
+            f"M3/Ma3 como en cada componente individual."
+        )
+
+
+def _add_element_index(doc: Document, data: ReportData) -> None:
+    """
+    Índice de TODOS los elementos del modelo (etiqueta -> ubicación física:
+    marco/bahía, lado, nivel y nudos de extremo con coordenadas), para que
+    el calculista pueda ubicar de inmediato, ante cualquier duda, a qué
+    elemento real corresponde una etiqueta mencionada en las secciones 5 o
+    "CHEQUEO" (p.ej. "VIGA B0-F N3" o "PARAL M1-P N2-N3"). "F"/"P" en la
+    etiqueta identifican el lado del marco: F=frente (Y=0), P=fondo/
+    posterior (Y=profundidad de marco) — antes ambos lados usaban la letra
+    "F" (frente y fondo empiezan igual en español) y dos elementos físicos
+    distintos terminaban con el mismo nombre en la memoria.
+    """
+    doc.add_heading("6. ÍNDICE DE ELEMENTOS (REFERENCIA RÁPIDA)", level=1)
+    doc.add_paragraph(
+        "F = lado frente del marco (Y=0). P = lado fondo/posterior del "
+        "marco (Y=profundidad de marco). Coordenadas de nudo en metros, "
+        "origen en la esquina frente-izquierda del piso."
+    )
+    m = data.model
+    members_sorted = sorted(
+        m.members.values(),
+        key=lambda mm: (mm.kind.name, mm.frame_index or 0, mm.bay_index or 0, mm.level_index or 0, mm.side or ""),
+    )
+    table = doc.add_table(rows=1, cols=7)
+    table.style = "Light Grid Accent 1"
+    for i, h in enumerate(["Etiqueta", "Tipo", "Marco/Bahía", "Lado", "Nivel", "Nudo i (x,y,z)", "Nudo j (x,y,z)"]):
+        table.rows[0].cells[i].text = h
+    for mm in members_sorted:
+        ni, nj = m.nodes[mm.node_i], m.nodes[mm.node_j]
+        row = table.add_row().cells
+        row[0].text = mm.label
+        row[1].text = mm.kind.name.capitalize()
+        row[2].text = (
+            f"Marco {mm.frame_index}" if mm.bay_index is None else f"Bahía {mm.bay_index}"
+        ) if (mm.frame_index is not None or mm.bay_index is not None) else "—"
+        row[3].text = {"frente": "F (frente)", "fondo": "P (fondo)"}.get(mm.side or "", "—")
+        row[4].text = str(mm.level_index) if mm.level_index is not None else "—"
+        row[5].text = f"({ni.x:.2f}, {ni.y:.2f}, {ni.z:.2f})"
+        row[6].text = f"({nj.x:.2f}, {nj.y:.2f}, {nj.z:.2f})"
+
+
+def _looks_like_real_ai_text(text: str) -> bool:
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    placeholders = ("consultando ia", "⚠")
+    low = stripped.lower()
+    return not any(low.startswith(p) for p in placeholders)
+
+
+def _add_ai_analysis(doc: Document, data: ReportData) -> None:
+    doc.add_heading("7. ANÁLISIS ASISTIDO POR IA", level=1)
+    if _looks_like_real_ai_text(data.ai_analysis):
+        doc.add_paragraph(
+            "El siguiente análisis fue generado por un modelo de lenguaje "
+            "(LLM, vía la API de Groq) a partir del resumen numérico de "
+            "este mismo cálculo (sismo, elementos más críticos, relación "
+            "demanda/capacidad). Es una ayuda de revisión adicional, NO "
+            "un chequeo normativo ni un reemplazo del criterio del "
+            "ingeniero calculista: puede pasar por alto errores o "
+            "malinterpretar el contexto del proyecto real."
+        ).italic = True
+        for line in data.ai_analysis.strip().splitlines():
+            line = line.strip()
+            if not line:
+                doc.add_paragraph()
+            elif line.startswith(("-", "•", "*")):
+                doc.add_paragraph(line.lstrip("-•* ").strip(), style="List Bullet")
+            else:
+                doc.add_paragraph(line)
+    else:
+        doc.add_paragraph(
+            "No se generaron recomendaciones de IA para este reporte "
+            "(use el botón \"Recomendaciones IA\" en Vortex antes de "
+            "exportar la memoria para incluir aquí ese análisis)."
+        )
 
 
 def _add_conclusions(doc: Document, data: ReportData) -> None:
-    doc.add_heading("6. CONCLUSIONES", level=1)
+    doc.add_heading("8. CONCLUSIONES", level=1)
     doc.add_paragraph(
         "Los elementos de la estantería descrita en esta memoria fueron "
         "verificados bajo las combinaciones de carga de la norma NTC 5689, "
@@ -446,6 +563,8 @@ def generate_memoria(data: ReportData, output_path: str) -> str:
     _add_input_data(doc, data)
     _add_results(doc, data)
     _add_resistencia_chequeo_tables(doc, data)
+    _add_element_index(doc, data)
+    _add_ai_analysis(doc, data)
     _add_conclusions(doc, data)
 
     doc.save(output_path)
