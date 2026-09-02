@@ -31,7 +31,7 @@ from ..report import ProjectInfo, ReportData, generate_memoria
 from ..units import kgf_to_kn
 from ..ai import (
     AdvisorError, DEFAULT_MODEL, AVAILABLE_MODELS, build_results_summary,
-    get_recommendations, list_available_models, load_local_api_key, save_local_api_key,
+    get_recommendations, list_available_models, load_local_api_key,
 )
 from .viewer3d import Viewer3D
 from .legend import ColorLegend
@@ -177,7 +177,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_show_diagram.toggled.connect(self._on_diagram_changed)
         diagram_row.addWidget(self.chk_show_diagram)
         self.cb_diagram_pattern = QtWidgets.QComboBox()
-        self.cb_diagram_pattern.addItems(["DL", "PL", "EL_X", "EL_Y"])
+        self.cb_diagram_pattern.addItems(["DL", "PL", "LL", "EL_X", "EL_Y"])
         self.cb_diagram_pattern.currentIndexChanged.connect(self._on_diagram_changed)
         diagram_row.addWidget(self.cb_diagram_pattern)
         self.cb_diagram_component = QtWidgets.QComboBox()
@@ -195,9 +195,11 @@ class MainWindow(QtWidgets.QMainWindow):
         diagram_row.addStretch(1)
         viewer_layout.addLayout(diagram_row)
 
+        viewer_container.setMinimumHeight(160)
         right.addWidget(viewer_container)
 
         self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setMinimumHeight(140)
 
         self.results_table = QtWidgets.QTableWidget(0, 5)
         self.results_table.setHorizontalHeaderLabels(
@@ -217,7 +219,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.ai_panel, "🤖 Recomendaciones IA")
 
         right.addWidget(self.tabs)
-        right.setSizes([650, 250])
+        right.setStretchFactor(0, 3)   # el visor 3D se lleva la mayor parte del espacio extra
+        right.setStretchFactor(1, 1)
+        right.setSizes([760, 200])
         main_layout.addWidget(right, 1)
 
         self.status = self.statusBar()
@@ -227,33 +231,41 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         Resumen de cargas y sismo, estilo la hoja "1.Datos_Entrada" /
         "2.Cargas_Sismo" de la memoria de cálculo en Excel de referencia:
-        carga de producto y peso propio (total y por nivel), coeficientes
-        sísmicos Ca/Cv/Cs y cortante basal V por dirección, y la
-        distribución vertical de fuerzas Fx por nivel. Se calcula con el
-        mismo motor ya validado (`vortex.loads.seismic`); este panel sólo
-        hace visibles esos resultados intermedios, no repite el cálculo.
+        carga de producto, carga viva y peso propio (por nivel y total de
+        todo el rack), coeficientes sísmicos Ca/Cv/Cs y cortante basal V
+        por dirección, y la distribución vertical de fuerzas Fx por
+        nivel. Se calcula con el mismo motor ya validado
+        (`vortex.loads.seismic`); este panel sólo hace visibles esos
+        resultados intermedios, no repite el cálculo.
+
+        Todo el contenido va dentro de un QScrollArea propio: así su
+        altura mínima no obliga al splitter principal a robarle espacio
+        vertical al visor 3D (antes esta pestaña, sin scroll, forzaba una
+        altura mínima grande y dejaba el visor apretado).
         """
+        outer = QtWidgets.QScrollArea()
+        outer.setWidgetResizable(True)
+        outer.setFrameShape(QtWidgets.QFrame.NoFrame)
+
         panel = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(panel)
 
         loads_box = QtWidgets.QGroupBox("⬇ Cargas (calculado)")
         loads_form = QtWidgets.QFormLayout(loads_box)
-        self.lbl_sum_pl_level = QtWidgets.QLabel("—")
-        self.lbl_sum_pl_total = QtWidgets.QLabel("—")
-        self.lbl_sum_dl_level = QtWidgets.QLabel("—")
-        self.lbl_sum_dl_total = QtWidgets.QLabel("—")
-        loads_form.addRow("Carga de producto (PL) por nivel-bahía", self.lbl_sum_pl_level)
-        loads_form.addRow("Carga de producto (PL) total", self.lbl_sum_pl_total)
-        loads_form.addRow("Peso propio (DL) tributario por nivel", self.lbl_sum_dl_level)
-        loads_form.addRow("Peso propio (DL) total (modelo 3D real)", self.lbl_sum_dl_total)
+        self.lbl_sum_pl = QtWidgets.QLabel("—")
+        self.lbl_sum_ll = QtWidgets.QLabel("—")
+        self.lbl_sum_dl = QtWidgets.QLabel("—")
+        loads_form.addRow("Producto (PL)", self.lbl_sum_pl)
+        loads_form.addRow("Viva (LL)", self.lbl_sum_ll)
+        loads_form.addRow("Peso propio (DL)", self.lbl_sum_dl)
         layout.addWidget(loads_box)
 
         seis_row = QtWidgets.QHBoxLayout()
         self.seis_trans_box, self._seis_trans_labels = self._build_seismic_summary_box(
-            "〰 Sismo transversal (marcos, R=4)"
+            "〰 Transversal (marcos, R=4)"
         )
         self.seis_long_box, self._seis_long_labels = self._build_seismic_summary_box(
-            "〰 Sismo longitudinal (vigas, R=6)"
+            "〰 Longitudinal (vigas, R=6)"
         )
         seis_row.addWidget(self.seis_trans_box)
         seis_row.addWidget(self.seis_long_box)
@@ -266,6 +278,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ["Nivel", "Altura desde piso (m)", "Fx transversal (kN)", "Fx longitudinal (kN)"]
         )
         self.table_fx.horizontalHeader().setStretchLastSection(True)
+        self.table_fx.setMinimumHeight(120)
         dist_layout.addWidget(self.table_fx)
         layout.addWidget(dist_box, 1)
 
@@ -276,19 +289,28 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(placeholder)
         self._lbl_summary_placeholder = placeholder
 
-        return panel
+        outer.setWidget(panel)
+        return outer
 
     def _build_seismic_summary_box(self, title: str):
+        """Grid de 2 columnas (en vez de una lista vertical de 8 filas)
+        para que las dos cajas sísmicas (transversal/longitudinal) quepan
+        una junto a otra sin ocupar tanta altura."""
         box = QtWidgets.QGroupBox(title)
-        form = QtWidgets.QFormLayout(box)
+        grid = QtWidgets.QGridLayout(box)
+        grid.setHorizontalSpacing(14)
         labels = {}
-        for key, caption in (
-            ("ca", "Ca"), ("cv", "Cv"), ("r", "R"), ("ip", "Ip"),
-            ("plrf", "PLRF"), ("ws", "Ws (peso sísmico efectivo)"),
-            ("cs", "Cs"), ("v", "V (cortante basal)"),
-        ):
+        pairs = (
+            ("ca", "Ca"), ("cv", "Cv"),
+            ("r", "R"), ("ip", "Ip"),
+            ("plrf", "PLRF"), ("cs", "Cs"),
+            ("ws", "Ws"), ("v", "V"),
+        )
+        for i, (key, caption) in enumerate(pairs):
+            row, col = divmod(i, 2)
             lbl = QtWidgets.QLabel("—")
-            form.addRow(caption, lbl)
+            grid.addWidget(QtWidgets.QLabel(f"{caption}:"), row, col * 2)
+            grid.addWidget(lbl, row, col * 2 + 1)
             labels[key] = lbl
         return box, labels
 
@@ -299,10 +321,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._lbl_summary_placeholder.setVisible(False)
 
-        self.lbl_sum_pl_level.setText(f"{self.sp_pl.value():.2f} kgf  ({kgf_to_kn(self.sp_pl.value()):.3f} kN)")
-        self.lbl_sum_pl_total.setText(f"{result.pl_total_kn:.2f} kN")
-        self.lbl_sum_dl_level.setText(f"{result.dl_per_level_kn:.3f} kN")
-        self.lbl_sum_dl_total.setText(f"{result.dl_total_kn:.3f} kN")
+        self.lbl_sum_pl.setText(
+            f"{self.sp_pl.value():.2f} kgf/nivel-bahía → {result.pl_total_kn:.2f} kN/nivel · "
+            f"{result.pl_grand_total_kn:.2f} kN total rack"
+        )
+        self.lbl_sum_ll.setText(
+            f"{self.sp_ll.value():.2f} kN/m² → {result.ll_total_kn:.2f} kN/nivel · "
+            f"{result.ll_grand_total_kn:.2f} kN total rack"
+        )
+        self.lbl_sum_dl.setText(
+            f"{result.dl_per_level_kn:.3f} kN/nivel (tributario) · "
+            f"{result.dl_total_kn:.3f} kN total (modelo 3D real)"
+        )
 
         for seis, labels in (
             (result.seismic_transversal, self._seis_trans_labels),
@@ -336,28 +366,22 @@ class MainWindow(QtWidgets.QMainWindow):
         Groq (https://console.groq.com), y muestra su respuesta como
         apoyo de lectura rápida — no reemplaza el criterio del calculista
         ni las verificaciones normativas ya hechas por Vortex.
+
+        Igual que en `_build_summary_panel`: el contenido va dentro de un
+        QScrollArea propio, para que si la pestaña queda con poca altura
+        disponible el panel se vuelva desplazable en vez de comprimirse
+        (con Qt aplastando la caja de configuración y el texto de estado
+        de la API key hasta hacerlos ilegibles).
         """
+        outer = QtWidgets.QScrollArea()
+        outer.setWidgetResizable(True)
+        outer.setFrameShape(QtWidgets.QFrame.NoFrame)
+
         panel = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(panel)
 
         cfg_box = QtWidgets.QGroupBox("Configuración (Groq)")
         cfg_form = QtWidgets.QFormLayout(cfg_box)
-
-        key_row = QtWidgets.QHBoxLayout()
-        self.ed_groq_key = QtWidgets.QLineEdit()
-        self.ed_groq_key.setEchoMode(QtWidgets.QLineEdit.Password)
-        self.ed_groq_key.setPlaceholderText("gsk_...")
-        self.ed_groq_key.setText(load_local_api_key())
-        key_row.addWidget(self.ed_groq_key, 1)
-        btn_save_key = QtWidgets.QPushButton("💾 Guardar")
-        btn_save_key.setToolTip(
-            "Guarda la API key en un archivo local (.groq_api_key, en la raíz "
-            "del proyecto) para no tener que volver a escribirla cada vez que "
-            "se abre Vortex. Ese archivo nunca se sube a git (ver .gitignore)."
-        )
-        btn_save_key.clicked.connect(self._on_save_groq_key)
-        key_row.addWidget(btn_save_key)
-        cfg_form.addRow("API key", key_row)
 
         model_row = QtWidgets.QHBoxLayout()
         self.cb_ai_model = QtWidgets.QComboBox()
@@ -375,14 +399,14 @@ class MainWindow(QtWidgets.QMainWindow):
         model_row.addWidget(self.btn_refresh_models)
         cfg_form.addRow("Modelo", model_row)
 
-        hint = QtWidgets.QLabel(
-            "Obtén una API key gratuita en console.groq.com/keys. Requiere "
-            "conexión a internet; la clave sólo se usa localmente para "
-            "llamar a la API de Groq, nunca se guarda en la memoria de cálculo."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #96a1ad; font-size: 10px;")
-        cfg_form.addRow(hint)
+        # La API key NO se pide ni se muestra en la interfaz: se configura
+        # directamente en el archivo vortex/ai/local_config.py (no se sube
+        # a git, ver .gitignore) o en la variable de entorno GROQ_API_KEY.
+        key_status = QtWidgets.QLabel(self._groq_key_status_text())
+        key_status.setWordWrap(True)
+        key_status.setStyleSheet("color: #96a1ad; font-size: 10px;")
+        self._lbl_groq_key_status = key_status
+        cfg_form.addRow(key_status)
         layout.addWidget(cfg_box)
 
         self.btn_ai_recommend = QtWidgets.QPushButton("🤖  Analizar resultados con IA")
@@ -396,8 +420,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "\"Analizar resultados con IA\" para obtener recomendaciones "
             "de ingeniería sobre los elementos más críticos."
         )
+        self.txt_ai_output.setMinimumHeight(280)
         layout.addWidget(self.txt_ai_output, 1)
-        return panel
+
+        outer.setWidget(panel)
+        return outer
 
     def _build_form_panel(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QWidget()
@@ -766,7 +793,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._ai_thread is not None and self._ai_thread.isRunning():
             return  # ya hay una consulta en curso
 
-        api_key = self.ed_groq_key.text().strip() or load_local_api_key()
+        api_key = load_local_api_key()
         model = self.cb_ai_model.currentText().strip() or DEFAULT_MODEL
         summary = build_results_summary(self.model, self.pipeline_result, self.last_inputs)
 
@@ -794,30 +821,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_ai_recommend.setEnabled(True)
         self.status.showMessage("La consulta a la IA falló. Ver detalle en el panel.")
 
-    def _on_save_groq_key(self) -> None:
-        api_key = self.ed_groq_key.text().strip()
-        if not api_key:
-            QtWidgets.QMessageBox.warning(self, "Vortex", "Escriba primero una API key para guardarla.")
-            return
-        try:
-            save_local_api_key(api_key)
-            QtWidgets.QMessageBox.information(
-                self, "Vortex",
-                "API key guardada en .groq_api_key (raíz del proyecto). "
-                "Se cargará automáticamente la próxima vez que abra Vortex; "
-                "ese archivo no se sube a git."
+    def _groq_key_status_text(self) -> str:
+        configured = bool(load_local_api_key())
+        if configured:
+            return (
+                "✓ API key de Groq configurada (vortex/ai/local_config.py o "
+                "variable de entorno GROQ_API_KEY)."
             )
-            self.status.showMessage("API key de Groq guardada localmente.")
-        except OSError as exc:
-            self._show_error("Error al guardar la API key", exc)
+        return (
+            "Sin API key configurada. Edite vortex/ai/local_config.py y pegue "
+            "su API key de https://console.groq.com/keys ahí (ese archivo no "
+            "se sube a git), o defina la variable de entorno GROQ_API_KEY."
+        )
 
     def on_refresh_ai_models(self) -> None:
         if self._models_thread is not None and self._models_thread.isRunning():
             return  # ya hay una consulta en curso
-        api_key = self.ed_groq_key.text().strip() or load_local_api_key()
+        api_key = load_local_api_key()
         if not api_key:
             QtWidgets.QMessageBox.warning(
-                self, "Vortex", "Escriba (o guarde) primero una API key de Groq."
+                self, "Vortex",
+                "No hay una API key de Groq configurada. Edite "
+                "vortex/ai/local_config.py (ver panel) y vuelva a intentar."
             )
             return
 

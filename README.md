@@ -149,8 +149,9 @@ Arriostramiento, Cargas, Sismo):
    holgado, amarillo = ajustado ≥0.9, rojo = no cumple >1.0).
 4. **Exportar memoria de cálculo** → guarda el reporte `.docx`.
 5. **Cargas y sismo** (pestaña junto a "Resultados") → resumen calculado
-   de la carga de producto (PL, por nivel y total), el peso propio real
-   del modelo 3D (DL, por nivel y total), y los coeficientes sísmicos
+   de la carga de producto (PL) y la carga viva (LL) — ambas por nivel y
+   como gran total de todo el rack —, el peso propio real del modelo 3D
+   (DL, por nivel y total), y los coeficientes sísmicos
    Ca/Cv/R/Ip/PLRF/Ws/Cs/V por dirección (transversal y longitudinal) más
    la distribución vertical de fuerzas Fx por nivel — el mismo tipo de
    resumen de las hojas "1.Datos_Entrada"/"2.Cargas_Sismo" de una memoria
@@ -158,6 +159,16 @@ Arriostramiento, Cargas, Sismo):
    una hoja de cálculo aparte). La ciudad (NSR-10 Tabla A.2.2.1) sigue
    autocompletando Aa/Av al seleccionarla, para las 32 ciudades de la
    tabla.
+
+   **Carga viva (LL):** el campo "Carga viva (LL) kN/m²" existía en la
+   GUI desde el principio pero no estaba conectado a ningún patrón de
+   carga — cualquier valor distinto de cero se ignoraba silenciosamente.
+   Ya corregido: se distribuye como carga de área (kN/m²) tributaria a
+   las dos vigas de cada nivel (igual que PL), entra en Ws (peso sísmico
+   efectivo, numeral 2.7.2 NTC 5689) y en las combinaciones de carga que
+   ya la incluían (`combinations.py` ya traía el factor de LL, simplemente
+   nunca recibía una fuerza distinta de cero) — sin cambiar ninguna
+   fórmula normativa ya validada.
 6. **Recomendaciones IA** (pestaña junto a "Resultados") → envía un
    resumen numérico del chequeo (elementos más críticos, parámetros
    sísmicos, conteo de fallas) a un modelo LLM a través de la API de
@@ -166,16 +177,18 @@ Arriostramiento, Cargas, Sismo):
    y conexión a internet; es una ayuda de lectura rápida de resultados,
    **no** un chequeo normativo ni un sustituto del criterio del calculista.
 
-   La API key se puede pegar en el campo del panel y presionar **💾
-   Guardar** para que quede en un archivo local `.groq_api_key` (creado
-   en la raíz del proyecto) y no haya que volver a escribirla cada vez
-   que se abre Vortex — ese archivo está en `.gitignore`, así que nunca
-   se sube al repositorio. También puede definirse como variable de
-   entorno `GROQ_API_KEY` (tiene prioridad sobre el archivo). Los
-   nombres de modelo de Groq cambian con el tiempo y según la cuenta; si
-   el modelo por defecto da un error "model_not_found", presione el
-   botón **🔄** junto al selector de modelo para listar los modelos
-   realmente disponibles para esa API key y elegir uno de ahí.
+   **La API key nunca se pide ni se muestra en la interfaz.** Se
+   configura directamente en el código: edita
+   `vortex/ai/local_config.py` (si clonaste con git, copia primero
+   `local_config.example.py` con ese nombre) y pega tu key entre las
+   comillas de `GROQ_API_KEY = "..."` — ese archivo está en
+   `.gitignore`, así que nunca se sube al repositorio. También puede
+   definirse como variable de entorno `GROQ_API_KEY` (tiene prioridad
+   sobre el archivo). Los nombres de modelo de Groq cambian con el
+   tiempo y según la cuenta; si el modelo por defecto da un error
+   "model_not_found", presione el botón **🔄** junto al selector de
+   modelo para listar los modelos realmente disponibles para esa API
+   key y elegir uno de ahí.
 
 **Ejemplo de línea de comandos** (reconstruye un caso de referencia y
 genera su memoria de cálculo):

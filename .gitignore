@@ -7,3 +7,4 @@ examples/*.csv
 .venv/
 venv/
 .groq_api_key
+vortex/ai/local_config.py

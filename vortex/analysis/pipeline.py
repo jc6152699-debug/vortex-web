@@ -73,7 +73,10 @@ class PipelineResult:
     member_rows: Dict[int, MemberResultRow] = field(default_factory=dict)
     dl_total_kn: float = 0.0     # kN, peso propio total (todos los parales y vigas)
     dl_per_level_kn: float = 0.0   # kN, peso propio promedio tributario por nivel
-    pl_total_kn: float = 0.0        # kN, carga de producto total (todas las bahías x niveles)
+    pl_total_kn: float = 0.0        # kN, carga de producto por nivel (todas las bahías)
+    pl_grand_total_kn: float = 0.0    # kN, carga de producto de TODO el rack (todas las bahías x niveles)
+    ll_total_kn: float = 0.0            # kN, carga viva por nivel (todas las bahías)
+    ll_grand_total_kn: float = 0.0        # kN, carga viva de TODO el rack (todas las bahías x niveles)
 
     def max_ratio(self) -> float:
         return max((r.ratio for r in self.member_rows.values()), default=0.0)
@@ -99,10 +102,20 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
         w_pl = (inputs.pl_per_level_kn / 2.0) / model.bay_length
         pl_loads.append(MemberLoad(member_id=m.id, wz=-w_pl))
 
-    pl_total = inputs.pl_per_level_kn * n_bays_total
+    # Carga viva (LL, kN/m²): se asume una carga de área (p.ej. pasarela de
+    # acceso) tributaria a las dos vigas de cada nivel, igual que la carga
+    # de producto — ancho tributario = profundidad de marco / 2 por viga.
+    w_ll_beam = inputs.ll_kn_m2 * model.frame_depth / 2.0
+    ll_loads = [
+        MemberLoad(member_id=m.id, wz=-w_ll_beam)
+        for m in model.members_of_kind(MemberKind.BEAM)
+    ]
+
+    pl_total = inputs.pl_per_level_kn * n_bays_total   # kN, por nivel (todas las bahías)
+    ll_total = inputs.ll_kn_m2 * model.bay_length * model.frame_depth * n_bays_total  # ídem
     levels_w = [
         sm.LevelWeight(i, model.level_elevations[i],
-                        weight_kn=sm.seismic_weight(pl=pl_total, dl=dl_per_level, ll=0.0, plrf=1.0))
+                        weight_kn=sm.seismic_weight(pl=pl_total, dl=dl_per_level, ll=ll_total, plrf=1.0))
         for i in range(1, n_levels + 1)
     ]
     height_total = model.level_elevations[-1] if model.level_elevations else 0.0
@@ -110,14 +123,14 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
     seis_trans = sm.compute_seismic(
         direction=sm.SeismicDirection.TRANSVERSAL,
         soil_type=inputs.seismic.soil_type, aa=inputs.seismic.aa, av=inputs.seismic.av,
-        pl=pl_total, dl=dl_per_level, ll=0.0, height_m=height_total, levels=levels_w,
+        pl=pl_total, dl=dl_per_level, ll=ll_total, height_m=height_total, levels=levels_w,
         essential=inputs.seismic.essential, hazardous_contents=inputs.seismic.hazardous_contents,
         public_access=inputs.seismic.public_access,
     )
     seis_long = sm.compute_seismic(
         direction=sm.SeismicDirection.LONGITUDINAL,
         soil_type=inputs.seismic.soil_type, aa=inputs.seismic.aa, av=inputs.seismic.av,
-        pl=pl_total, dl=dl_per_level, ll=0.0, height_m=height_total, levels=levels_w,
+        pl=pl_total, dl=dl_per_level, ll=ll_total, height_m=height_total, levels=levels_w,
         pl_promedio=inputs.seismic.pl_promedio_ratio * pl_total, pl_maxima=pl_total,
         essential=inputs.seismic.essential, hazardous_contents=inputs.seismic.hazardous_contents,
         public_access=inputs.seismic.public_access,
@@ -136,6 +149,7 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
     patterns = {
         "DL": analyze(model, [], dl_loads),
         "PL": analyze(model, [], pl_loads),
+        "LL": analyze(model, [], ll_loads),
         "EL_X": analyze(model, el_x_loads, []),
         "EL_Y": analyze(model, el_y_loads, []),
     }
@@ -147,7 +161,9 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
     result = PipelineResult(
         patterns=patterns, seismic_transversal=seis_trans, seismic_longitudinal=seis_long,
         combos=combos,
-        dl_total_kn=dl_total, dl_per_level_kn=dl_per_level, pl_total_kn=pl_total,
+        dl_total_kn=dl_total, dl_per_level_kn=dl_per_level,
+        pl_total_kn=pl_total, pl_grand_total_kn=pl_total * n_levels,
+        ll_total_kn=ll_total, ll_grand_total_kn=ll_total * n_levels,
     )
 
     w_pl_beam = (inputs.pl_per_level_kn / 2.0) / model.bay_length
@@ -157,14 +173,16 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
         for combo, el_pattern in ((combo_gravity, None), (combo_seismic, "EL_X"), (combo_seismic, "EL_Y")):
             f_dl = combo.factors.get(LoadCase.DL, 0.0)
             f_pl = combo.factors.get(LoadCase.PL, 0.0)
+            f_ll = combo.factors.get(LoadCase.LL, 0.0)
             f_el = combo.factors.get(LoadCase.EL, 0.0)
             mf_dl = patterns["DL"].member_forces[member.id]
             mf_pl = patterns["PL"].member_forces[member.id]
-            P = f_dl * mf_dl.P_i + f_pl * mf_pl.P_i
-            M2 = f_dl * mf_dl.M2_i + f_pl * mf_pl.M2_i
-            M3 = f_dl * mf_dl.M3_i + f_pl * mf_pl.M3_i
-            V2 = f_dl * mf_dl.V2_i + f_pl * mf_pl.V2_i
-            V3 = f_dl * mf_dl.V3_i + f_pl * mf_pl.V3_i
+            mf_ll = patterns["LL"].member_forces[member.id]
+            P = f_dl * mf_dl.P_i + f_pl * mf_pl.P_i + f_ll * mf_ll.P_i
+            M2 = f_dl * mf_dl.M2_i + f_pl * mf_pl.M2_i + f_ll * mf_ll.M2_i
+            M3 = f_dl * mf_dl.M3_i + f_pl * mf_pl.M3_i + f_ll * mf_ll.M3_i
+            V2 = f_dl * mf_dl.V2_i + f_pl * mf_pl.V2_i + f_ll * mf_ll.V2_i
+            V3 = f_dl * mf_dl.V3_i + f_pl * mf_pl.V3_i + f_ll * mf_ll.V3_i
             if el_pattern is not None:
                 mf_el = patterns[el_pattern].member_forces[member.id]
                 P += f_el * mf_el.P_i
@@ -194,24 +212,42 @@ def run_full_check(model: RackModel, inputs: PipelineInputs) -> PipelineResult:
     for member in model.members_of_kind(MemberKind.BEAM):
         f_dl = combo_gravity.factors.get(LoadCase.DL, 0.0)
         f_pl = combo_gravity.factors.get(LoadCase.PL, 0.0)
+        f_ll = combo_gravity.factors.get(LoadCase.LL, 0.0)
         mf_dl = patterns["DL"].member_forces[member.id]
         mf_pl = patterns["PL"].member_forces[member.id]
+        mf_ll = patterns["LL"].member_forces[member.id]
         w_dl_beam = dl_by_member.get(member.id, 0.0) / model.bay_length
 
         MF = type(mf_dl)
         mf_combo = MF(
             member_id=member.id,
-            P_i=0.0, V2_i=0.0, V3_i=f_dl * mf_dl.V3_i + f_pl * mf_pl.V3_i,
-            T_i=0.0, M2_i=f_dl * mf_dl.M2_i + f_pl * mf_pl.M2_i, M3_i=0.0,
-            P_j=0.0, V2_j=0.0, V3_j=f_dl * mf_dl.V3_j + f_pl * mf_pl.V3_j,
-            T_j=0.0, M2_j=f_dl * mf_dl.M2_j + f_pl * mf_pl.M2_j, M3_j=0.0,
+            P_i=0.0, V2_i=0.0,
+            V3_i=f_dl * mf_dl.V3_i + f_pl * mf_pl.V3_i + f_ll * mf_ll.V3_i,
+            T_i=0.0,
+            M2_i=f_dl * mf_dl.M2_i + f_pl * mf_pl.M2_i + f_ll * mf_ll.M2_i, M3_i=0.0,
+            P_j=0.0, V2_j=0.0,
+            V3_j=f_dl * mf_dl.V3_j + f_pl * mf_pl.V3_j + f_ll * mf_ll.V3_j,
+            T_j=0.0,
+            M2_j=f_dl * mf_dl.M2_j + f_pl * mf_pl.M2_j + f_ll * mf_ll.M2_j, M3_j=0.0,
             r_int_z=(0.0, 0.0), r_int_y=mf_pl.r_int_y,
         )
         r = check_beam(
             member.section, combo_gravity.label(), mf_combo,
-            w_local_z=-(f_dl * w_dl_beam + f_pl * w_pl_beam), L=model.bay_length,
+            w_local_z=-(f_dl * w_dl_beam + f_pl * w_pl_beam + f_ll * w_ll_beam), L=model.bay_length,
         )
-        r = check_deflection(r, member.section, mf_pl, w_local_z_service=-w_pl_beam, L=model.bay_length)
+        # Deflexión de servicio bajo LL+PL sin mayorar (numeral 2.4 NTC 5689).
+        mf_service = MF(
+            member_id=member.id,
+            P_i=0.0, V2_i=0.0, V3_i=mf_pl.V3_i + mf_ll.V3_i,
+            T_i=0.0, M2_i=mf_pl.M2_i + mf_ll.M2_i, M3_i=0.0,
+            P_j=0.0, V2_j=0.0, V3_j=mf_pl.V3_j + mf_ll.V3_j,
+            T_j=0.0, M2_j=mf_pl.M2_j + mf_ll.M2_j, M3_j=0.0,
+            r_int_z=(0.0, 0.0),
+            r_int_y=(mf_pl.r_int_y[0] + mf_ll.r_int_y[0], mf_pl.r_int_y[1] + mf_ll.r_int_y[1]),
+        )
+        r = check_deflection(
+            r, member.section, mf_service, w_local_z_service=-(w_pl_beam + w_ll_beam), L=model.bay_length,
+        )
         result.member_rows[member.id] = MemberResultRow(
             member_id=member.id, label=member.label, kind="Viga",
             combo=combo_gravity.label(), ratio=r.ratio,
@@ -280,6 +316,7 @@ def element_forces_table(
     """
     dl_by_member = dead_load_uprights(model)
     w_pl_beam = (inputs.pl_per_level_kn / 2.0) / model.bay_length
+    w_ll_beam = inputs.ll_kn_m2 * model.frame_depth / 2.0
 
     combo_ids = ("1", "2", "5")
     seen_ids = set()
@@ -300,15 +337,19 @@ def element_forces_table(
         for combo in combos:
             f_dl = combo.factors.get(LoadCase.DL, 0.0)
             f_pl = combo.factors.get(LoadCase.PL, 0.0)
+            f_ll = combo.factors.get(LoadCase.LL, 0.0)
             f_el = combo.factors.get(LoadCase.EL, 0.0)
 
             mf_dl = result.patterns["DL"].member_forces[member.id]
             mf_pl = result.patterns["PL"].member_forces[member.id]
+            mf_ll = result.patterns["LL"].member_forces[member.id]
             mf_el = result.patterns[el_pattern].member_forces[member.id] if f_el else None
 
             def combine(attr_i: str, attr_j: str):
-                vi = f_dl * getattr(mf_dl, attr_i) + f_pl * getattr(mf_pl, attr_i)
-                vj = f_dl * getattr(mf_dl, attr_j) + f_pl * getattr(mf_pl, attr_j)
+                vi = (f_dl * getattr(mf_dl, attr_i) + f_pl * getattr(mf_pl, attr_i)
+                      + f_ll * getattr(mf_ll, attr_i))
+                vj = (f_dl * getattr(mf_dl, attr_j) + f_pl * getattr(mf_pl, attr_j)
+                      + f_ll * getattr(mf_ll, attr_j))
                 if mf_el is not None:
                     vi += f_el * getattr(mf_el, attr_i)
                     vj += f_el * getattr(mf_el, attr_j)
@@ -320,7 +361,10 @@ def element_forces_table(
             M2_i, M2_j = combine("M2_i", "M2_j")
             V3_i, V3_j = combine("V3_i", "V3_j")
 
-            w_z_combo = (f_dl * w_dl + f_pl * w_pl_beam) if member.kind == MemberKind.BEAM else 0.0
+            w_z_combo = (
+                (f_dl * w_dl + f_pl * w_pl_beam + f_ll * w_ll_beam)
+                if member.kind == MemberKind.BEAM else 0.0
+            )
 
             MF = type(mf_dl)
             mf_combo = MF(

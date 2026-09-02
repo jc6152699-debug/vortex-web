@@ -13,6 +13,7 @@ hechas por `vortex.design`.
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 from typing import List, TYPE_CHECKING
 
@@ -35,40 +36,57 @@ AVAILABLE_MODELS = [
     "openai/gpt-oss-120b",
 ]
 
-# Ruta de un archivo local (NO versionado, ver .gitignore) donde se puede
-# guardar la API key de Groq una sola vez para no tener que volver a
-# escribirla cada vez que se abre la aplicación. Prioridad de lectura:
-# variable de entorno GROQ_API_KEY primero, luego este archivo.
+# Archivo .py local (NO versionado, ver .gitignore + local_config.example.py)
+# que el usuario edita directamente para pegar su API key de Groq — nunca
+# se pide ni se muestra en un campo de la interfaz gráfica.
+_LOCAL_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_config.py")
+
+# Forma alterna (texto plano) mantenida por compatibilidad; tampoco
+# versionada (ver .gitignore).
 _LOCAL_KEY_FILE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     ".groq_api_key",
 )
 
 
+def _read_local_config_key() -> str:
+    """Ejecuta `local_config.py` (si existe) en un namespace aislado y
+    devuelve su `GROQ_API_KEY` — se lee del archivo en disco en cada
+    llamada (no se cachea como un import normal) para que basta con
+    guardar el archivo y volver a intentar, sin reiniciar Vortex."""
+    if not os.path.isfile(_LOCAL_CONFIG_FILE):
+        return ""
+    try:
+        spec = importlib.util.spec_from_file_location("_vortex_ai_local_config", _LOCAL_CONFIG_FILE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except Exception:
+        return ""
+    return str(getattr(module, "GROQ_API_KEY", "")).strip()
+
+
 def load_local_api_key() -> str:
     """
-    Devuelve la API key de Groq guardada localmente: primero la variable
-    de entorno GROQ_API_KEY, si no, el contenido (una sola línea) del
-    archivo `.groq_api_key` en la raíz del proyecto (creado a mano por el
-    usuario; nunca se sube a git — ver .gitignore). Devuelve "" si no hay
-    ninguna configurada.
+    Devuelve la API key de Groq configurada localmente — nunca en un
+    campo de la GUI. Orden de precedencia:
+      1. Variable de entorno GROQ_API_KEY.
+      2. `vortex/ai/local_config.py` (archivo .py editado a mano; ver
+         `local_config.example.py`; no se sube a git).
+      3. Archivo de texto `.groq_api_key` en la raíz del proyecto (forma
+         alterna, tampoco versionada — ver .gitignore).
+    Devuelve "" si no hay ninguna configurada por ninguna vía.
     """
     env_key = os.environ.get("GROQ_API_KEY", "").strip()
     if env_key:
         return env_key
+    config_key = _read_local_config_key()
+    if config_key:
+        return config_key
     try:
         with open(_LOCAL_KEY_FILE, "r", encoding="utf-8") as f:
             return f.read().strip()
     except OSError:
         return ""
-
-
-def save_local_api_key(api_key: str) -> None:
-    """Guarda `api_key` en el archivo local `.groq_api_key` (raíz del
-    proyecto, ignorado por git) para que quede disponible entre sesiones
-    sin tener que volver a escribirla en la GUI."""
-    with open(_LOCAL_KEY_FILE, "w", encoding="utf-8") as f:
-        f.write(api_key.strip() + "\n")
 
 SYSTEM_PROMPT = (
     "Eres un ingeniero estructural senior, experto en diseño de estanterías "

@@ -12,8 +12,17 @@ from vortex.units import kgf_to_kn
 from vortex.ai import advisor
 from vortex.ai.advisor import (
     AdvisorError, build_results_summary, get_recommendations, list_available_models,
-    load_local_api_key, save_local_api_key,
+    load_local_api_key,
 )
+
+
+def _isolate_local_key_sources(monkeypatch, tmp_path):
+    """Aísla load_local_api_key() del estado real del repo (variable de
+    entorno del proceso, vortex/ai/local_config.py real, .groq_api_key
+    real) apuntando ambas rutas a un directorio temporal vacío."""
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setattr(advisor, "_LOCAL_CONFIG_FILE", str(tmp_path / "local_config.py"))
+    monkeypatch.setattr(advisor, "_LOCAL_KEY_FILE", str(tmp_path / ".groq_api_key"))
 
 
 def _build():
@@ -133,17 +142,33 @@ def test_list_available_models_http_error(monkeypatch):
         list_available_models(api_key="bad-key")
 
 
-def test_local_api_key_roundtrip(monkeypatch, tmp_path):
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    monkeypatch.setattr(advisor, "_LOCAL_KEY_FILE", str(tmp_path / ".groq_api_key"))
+def test_load_local_api_key_none_configured_returns_empty(monkeypatch, tmp_path):
+    _isolate_local_key_sources(monkeypatch, tmp_path)
     assert load_local_api_key() == ""
-    save_local_api_key("gsk_test_123")
-    assert load_local_api_key() == "gsk_test_123"
 
 
-def test_local_api_key_env_var_takes_precedence(monkeypatch, tmp_path):
-    key_file = tmp_path / ".groq_api_key"
-    key_file.write_text("from-file\n")
-    monkeypatch.setattr(advisor, "_LOCAL_KEY_FILE", str(key_file))
-    monkeypatch.setenv("GROQ_API_KEY", "from-env")
-    assert load_local_api_key() == "from-env"
+def test_load_local_api_key_reads_local_config_py(monkeypatch, tmp_path):
+    _isolate_local_key_sources(monkeypatch, tmp_path)
+    (tmp_path / "local_config.py").write_text('GROQ_API_KEY = "gsk_from_config"\n')
+    assert load_local_api_key() == "gsk_from_config"
+
+
+def test_load_local_api_key_falls_back_to_text_file(monkeypatch, tmp_path):
+    _isolate_local_key_sources(monkeypatch, tmp_path)
+    (tmp_path / ".groq_api_key").write_text("gsk_from_file\n")
+    assert load_local_api_key() == "gsk_from_file"
+
+
+def test_load_local_api_key_local_config_beats_text_file(monkeypatch, tmp_path):
+    _isolate_local_key_sources(monkeypatch, tmp_path)
+    (tmp_path / ".groq_api_key").write_text("gsk_from_file\n")
+    (tmp_path / "local_config.py").write_text('GROQ_API_KEY = "gsk_from_config"\n')
+    assert load_local_api_key() == "gsk_from_config"
+
+
+def test_load_local_api_key_env_var_beats_everything(monkeypatch, tmp_path):
+    _isolate_local_key_sources(monkeypatch, tmp_path)
+    (tmp_path / ".groq_api_key").write_text("gsk_from_file\n")
+    (tmp_path / "local_config.py").write_text('GROQ_API_KEY = "gsk_from_config"\n')
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_from_env")
+    assert load_local_api_key() == "gsk_from_env"
