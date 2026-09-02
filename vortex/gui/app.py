@@ -1,8 +1,9 @@
 """
 Aplicación de escritorio Vortex: interfaz visual para modelar, analizar y
 verificar estanterías industriales de acero según NTC 5689, con un flujo
-de trabajo similar al de Autodesk Inventor (modelado paramétrico) y
-SAP2000 (análisis matricial + resultados coloreados por elemento).
+de trabajo similar al de Autodesk Inventor (modelado paramétrico, barra de
+herramientas superior, panel de propiedades) y SAP2000 (análisis matricial
++ resultados coloreados por elemento).
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ import sys
 import traceback
 from typing import Optional
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..geometry import (
     RackParameters, build_selective_rack,
@@ -28,34 +29,100 @@ from ..analysis import (
 )
 from ..report import ProjectInfo, ReportData, generate_memoria
 from ..units import kgf_to_kn
+from ..ai import AdvisorError, DEFAULT_MODEL, AVAILABLE_MODELS, build_results_summary, get_recommendations
 from .viewer3d import Viewer3D
 from .legend import ColorLegend
+from .theme import apply_dark_theme
 
 SOIL_TYPES = ["A", "B", "C", "D", "E"]
 BRACE_ANGLES_DEG = [30, 45, 60, 65, 70, 75]
+
+
+class _AdvisorWorker(QtCore.QObject):
+    """Ejecuta la llamada (bloqueante, por red) a la API de Groq en un
+    hilo aparte para no congelar la interfaz."""
+
+    finished = QtCore.Signal(str)
+    failed = QtCore.Signal(str)
+
+    def __init__(self, summary: str, api_key: str, model: str):
+        super().__init__()
+        self._summary = summary
+        self._api_key = api_key
+        self._model = model
+
+    def run(self) -> None:
+        try:
+            text = get_recommendations(self._summary, self._api_key, self._model)
+            self.finished.emit(text)
+        except AdvisorError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # defensivo: nunca dejar el hilo morir en silencio
+            self.failed.emit(f"Error inesperado consultando la IA: {exc}")
 
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Vortex — Cálculo y modelado de estanterías industriales (NTC 5689)")
-        self.resize(1400, 900)
+        self.resize(1500, 940)
 
         self.catalog = default_catalog()
         self.model: Optional[RackModel] = None
         self.pipeline_result: Optional[PipelineResult] = None
         self.last_inputs: Optional[PipelineInputs] = None
+        self._ai_thread: Optional[QtCore.QThread] = None
+        self._ai_worker: Optional[_AdvisorWorker] = None
 
+        self._build_toolbar()
         self._build_ui()
 
     # ------------------------------------------------------------------
+    def _build_toolbar(self) -> None:
+        toolbar = QtWidgets.QToolBar("Principal")
+        toolbar.setMovable(False)
+        toolbar.setIconSize(QtCore.QSize(1, 1))  # sin íconos gráficos, solo texto/emoji
+        toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.addToolBar(toolbar)
+
+        act_build = QtGui.QAction("🧱  1. Construir modelo", self)
+        act_build.triggered.connect(self.on_build_model)
+        toolbar.addAction(act_build)
+
+        act_analyze = QtGui.QAction("📊  2. Analizar y verificar", self)
+        act_analyze.triggered.connect(self.on_analyze)
+        toolbar.addAction(act_analyze)
+
+        toolbar.addSeparator()
+
+        act_export = QtGui.QAction("📄  Memoria de cálculo (.docx)", self)
+        act_export.triggered.connect(self.on_export)
+        toolbar.addAction(act_export)
+
+        act_export_forces = QtGui.QAction("📈  Fuerzas por elemento (.csv)", self)
+        act_export_forces.triggered.connect(self.on_export_element_forces)
+        toolbar.addAction(act_export_forces)
+
+        toolbar.addSeparator()
+
+        act_ai = QtGui.QAction("🤖  Recomendaciones IA", self)
+        act_ai.triggered.connect(self._on_ai_toolbar_clicked)
+        toolbar.addAction(act_ai)
+
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         main_layout = QtWidgets.QHBoxLayout(central)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(8)
 
         self.form_panel = self._build_form_panel()
-        main_layout.addWidget(self.form_panel, 0)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self.form_panel)
+        scroll.setFixedWidth(392)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        main_layout.addWidget(scroll, 0)
 
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
 
@@ -104,27 +171,82 @@ class MainWindow(QtWidgets.QMainWindow):
 
         right.addWidget(viewer_container)
 
+        self.tabs = QtWidgets.QTabWidget()
+
         self.results_table = QtWidgets.QTableWidget(0, 5)
         self.results_table.setHorizontalHeaderLabels(
             ["Elemento", "Tipo", "Combinación crítica", "Detalle", "Ratio"]
         )
+        self.results_table.setAlternatingRowColors(True)
         self.results_table.horizontalHeader().setStretchLastSection(False)
         self.results_table.horizontalHeader().setSectionResizeMode(
             3, QtWidgets.QHeaderView.Stretch
         )
-        right.addWidget(self.results_table)
+        self.tabs.addTab(self.results_table, "📋 Resultados")
+
+        self.ai_panel = self._build_ai_panel()
+        self.tabs.addTab(self.ai_panel, "🤖 Recomendaciones IA")
+
+        right.addWidget(self.tabs)
         right.setSizes([650, 250])
         main_layout.addWidget(right, 1)
 
         self.status = self.statusBar()
         self.status.showMessage("Defina la geometría y presione \"Construir modelo\".")
 
-    def _build_form_panel(self) -> QtWidgets.QWidget:
+    def _build_ai_panel(self) -> QtWidgets.QWidget:
+        """
+        Panel de recomendaciones de IA: envía un resumen numérico del
+        chequeo estructural (parales/vigas más críticos, parámetros
+        sísmicos, elementos que no cumplen) a un modelo LLM vía la API de
+        Groq (https://console.groq.com), y muestra su respuesta como
+        apoyo de lectura rápida — no reemplaza el criterio del calculista
+        ni las verificaciones normativas ya hechas por Vortex.
+        """
         panel = QtWidgets.QWidget()
-        panel.setFixedWidth(360)
         layout = QtWidgets.QVBoxLayout(panel)
 
-        geo_box = QtWidgets.QGroupBox("Geometría")
+        cfg_box = QtWidgets.QGroupBox("Configuración (Groq)")
+        cfg_form = QtWidgets.QFormLayout(cfg_box)
+        self.ed_groq_key = QtWidgets.QLineEdit()
+        self.ed_groq_key.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.ed_groq_key.setPlaceholderText("gsk_...")
+        self.ed_groq_key.setText(os.environ.get("GROQ_API_KEY", ""))
+        self.cb_ai_model = QtWidgets.QComboBox()
+        self.cb_ai_model.setEditable(True)
+        self.cb_ai_model.addItems(AVAILABLE_MODELS)
+        self.cb_ai_model.setCurrentText(DEFAULT_MODEL)
+        cfg_form.addRow("API key", self.ed_groq_key)
+        cfg_form.addRow("Modelo", self.cb_ai_model)
+        hint = QtWidgets.QLabel(
+            "Obtén una API key gratuita en console.groq.com/keys. Requiere "
+            "conexión a internet; la clave sólo se usa localmente para "
+            "llamar a la API de Groq, nunca se guarda en la memoria de cálculo."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #96a1ad; font-size: 10px;")
+        cfg_form.addRow(hint)
+        layout.addWidget(cfg_box)
+
+        self.btn_ai_recommend = QtWidgets.QPushButton("🤖  Analizar resultados con IA")
+        self.btn_ai_recommend.setObjectName("primaryAction")
+        self.btn_ai_recommend.clicked.connect(self.on_ai_recommend)
+        layout.addWidget(self.btn_ai_recommend)
+
+        self.txt_ai_output = QtWidgets.QTextBrowser()
+        self.txt_ai_output.setPlaceholderText(
+            "Ejecute \"Analizar y verificar\" y luego presione "
+            "\"Analizar resultados con IA\" para obtener recomendaciones "
+            "de ingeniería sobre los elementos más críticos."
+        )
+        layout.addWidget(self.txt_ai_output, 1)
+        return panel
+
+    def _build_form_panel(self) -> QtWidgets.QWidget:
+        panel = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(panel)
+
+        geo_box = QtWidgets.QGroupBox("📐 Geometría")
         geo_form = QtWidgets.QFormLayout(geo_box)
         self.sp_bays = QtWidgets.QSpinBox(); self.sp_bays.setRange(1, 50); self.sp_bays.setValue(4)
         self.sp_bay_length = QtWidgets.QDoubleSpinBox(); self.sp_bay_length.setRange(0.5, 6.0)
@@ -148,7 +270,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for sp in (self.sp_depth, self.sp_n_levels, self.sp_h_first, self.sp_h_rest):
             sp.valueChanged.connect(self._update_brace_preview)
 
-        sec_box = QtWidgets.QGroupBox("Secciones")
+        sec_box = QtWidgets.QGroupBox("🔩 Secciones")
         sec_form = QtWidgets.QFormLayout(sec_box)
         self.cb_upright = QtWidgets.QComboBox()
         self.cb_beam = QtWidgets.QComboBox()
@@ -165,7 +287,7 @@ class MainWindow(QtWidgets.QMainWindow):
         sec_form.addRow("Diagonal", self.cb_brace)
         layout.addWidget(sec_box)
 
-        brace_box = QtWidgets.QGroupBox("Arriostramiento del marco (riostras)")
+        brace_box = QtWidgets.QGroupBox("╱ Arriostramiento del marco (riostras)")
         brace_form = QtWidgets.QFormLayout(brace_box)
         self.cb_brace_angle = QtWidgets.QComboBox()
         self.cb_brace_angle.addItem("Automático (según cantidad)", None)
@@ -175,7 +297,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sp_brace_count = QtWidgets.QSpinBox()
         self.sp_brace_count.setRange(1, 200)
         self.lbl_brace_info = QtWidgets.QLabel("—")
-        self.lbl_brace_info.setStyleSheet("color: #555; font-size: 10px;")
+        self.lbl_brace_info.setStyleSheet("color: #96a1ad; font-size: 10px;")
         self.lbl_brace_info.setWordWrap(True)
         brace_form.addRow("Ángulo objetivo", self.cb_brace_angle)
         brace_form.addRow("Cantidad de diagonales", self.sp_brace_count)
@@ -186,7 +308,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_brace_angle.currentIndexChanged.connect(self._on_brace_angle_changed)
         self.sp_brace_count.valueChanged.connect(self._on_brace_count_changed)
 
-        load_box = QtWidgets.QGroupBox("Cargas")
+        load_box = QtWidgets.QGroupBox("⬇ Cargas")
         load_form = QtWidgets.QFormLayout(load_box)
         self.sp_pl = QtWidgets.QDoubleSpinBox(); self.sp_pl.setRange(0, 100000)
         self.sp_pl.setValue(2400.0); self.sp_pl.setSuffix(" kgf / nivel-bahía")
@@ -196,7 +318,7 @@ class MainWindow(QtWidgets.QMainWindow):
         load_form.addRow("Carga viva (LL)", self.sp_ll)
         layout.addWidget(load_box)
 
-        seis_box = QtWidgets.QGroupBox("Sismo — NTC 5689 numeral 2.7")
+        seis_box = QtWidgets.QGroupBox("〰 Sismo — NTC 5689 numeral 2.7")
         seis_form = QtWidgets.QFormLayout(seis_box)
         self.cb_city = QtWidgets.QComboBox()
         self.cb_city.addItems(sorted(AA_AV_BY_CITY.keys()))
@@ -219,20 +341,6 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(seis_box)
         self._on_city_changed(self.cb_city.currentText())
 
-        btn_build = QtWidgets.QPushButton("1. Construir modelo")
-        btn_build.clicked.connect(self.on_build_model)
-        btn_analyze = QtWidgets.QPushButton("2. Analizar y verificar")
-        btn_analyze.clicked.connect(self.on_analyze)
-        btn_export = QtWidgets.QPushButton("3. Exportar memoria de cálculo (.docx)")
-        btn_export.clicked.connect(self.on_export)
-        btn_export_forces = QtWidgets.QPushButton(
-            "Exportar tabla de fuerzas por elemento (.csv, chequeo cruzado)"
-        )
-        btn_export_forces.clicked.connect(self.on_export_element_forces)
-        layout.addWidget(btn_build)
-        layout.addWidget(btn_analyze)
-        layout.addWidget(btn_export)
-        layout.addWidget(btn_export_forces)
         layout.addStretch(1)
 
         disclaimer = QtWidgets.QLabel(
@@ -241,7 +349,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "responsable antes de su uso para fabricación o construcción."
         )
         disclaimer.setWordWrap(True)
-        disclaimer.setStyleSheet("color: #888; font-size: 10px;")
+        disclaimer.setStyleSheet("color: #96a1ad; font-size: 10px;")
         layout.addWidget(disclaimer)
 
         self._update_brace_preview()
@@ -354,6 +462,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._apply_coloring()
             self._on_diagram_changed()
             self._populate_results_table()
+            self.tabs.setCurrentWidget(self.results_table)
             n_fail = sum(1 for r in self.pipeline_result.member_rows.values() if r.ratio > 1.0)
             self.status.showMessage(
                 f"Análisis completo. Ratio máximo: {self.pipeline_result.max_ratio():.2f}. "
@@ -403,9 +512,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 item = QtWidgets.QTableWidgetItem(v)
                 if j == 4:
                     if row.ratio > 1.0:
-                        item.setBackground(QtCore.Qt.red)
+                        item.setBackground(QtGui.QColor("#5c2622"))
+                        item.setForeground(QtGui.QColor("#ff8a80"))
                     elif row.ratio > 0.9:
-                        item.setBackground(QtCore.Qt.yellow)
+                        item.setBackground(QtGui.QColor("#5c4d1a"))
+                        item.setForeground(QtGui.QColor("#ffe08a"))
                 self.results_table.setItem(i, j, item)
         self.results_table.resizeColumnsToContents()
 
@@ -480,6 +591,49 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             self._show_error("Error al exportar la tabla de fuerzas", exc)
 
+    # -------------------------- IA (Groq) ------------------------------
+    def _on_ai_toolbar_clicked(self) -> None:
+        self.tabs.setCurrentWidget(self.ai_panel)
+        if self.pipeline_result is not None:
+            self.on_ai_recommend()
+
+    def on_ai_recommend(self) -> None:
+        if self.model is None or self.pipeline_result is None or self.last_inputs is None:
+            QtWidgets.QMessageBox.warning(
+                self, "Vortex", "Primero construya el modelo y ejecute el análisis."
+            )
+            return
+        if self._ai_thread is not None and self._ai_thread.isRunning():
+            return  # ya hay una consulta en curso
+
+        api_key = self.ed_groq_key.text().strip() or os.environ.get("GROQ_API_KEY", "")
+        model = self.cb_ai_model.currentText().strip() or DEFAULT_MODEL
+        summary = build_results_summary(self.model, self.pipeline_result, self.last_inputs)
+
+        self.txt_ai_output.setPlainText("Consultando IA (Groq)...")
+        self.btn_ai_recommend.setEnabled(False)
+
+        self._ai_thread = QtCore.QThread(self)
+        self._ai_worker = _AdvisorWorker(summary, api_key, model)
+        self._ai_worker.moveToThread(self._ai_thread)
+        self._ai_thread.started.connect(self._ai_worker.run)
+        self._ai_worker.finished.connect(self._on_ai_finished)
+        self._ai_worker.failed.connect(self._on_ai_failed)
+        self._ai_worker.finished.connect(self._ai_thread.quit)
+        self._ai_worker.failed.connect(self._ai_thread.quit)
+        self._ai_thread.finished.connect(self._ai_thread.deleteLater)
+        self._ai_thread.start()
+
+    def _on_ai_finished(self, text: str) -> None:
+        self.txt_ai_output.setPlainText(text)
+        self.btn_ai_recommend.setEnabled(True)
+        self.status.showMessage("Recomendaciones de IA recibidas.")
+
+    def _on_ai_failed(self, msg: str) -> None:
+        self.txt_ai_output.setPlainText(f"⚠ {msg}")
+        self.btn_ai_recommend.setEnabled(True)
+        self.status.showMessage("La consulta a la IA falló. Ver detalle en el panel.")
+
     def _show_error(self, title: str, exc: Exception) -> None:
         detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
         box = QtWidgets.QMessageBox(self)
@@ -492,6 +646,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main() -> None:
     app = QtWidgets.QApplication(sys.argv)
+    apply_dark_theme(app)
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

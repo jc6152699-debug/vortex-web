@@ -136,6 +136,11 @@ pip install -r requirements.txt
 python3 main.py
 ```
 
+La interfaz usa un tema oscuro tipo CAD (similar a Autodesk Inventor), con
+una barra de herramientas superior para el flujo principal y un panel de
+propiedades a la izquierda organizado por categorías (Geometría, Secciones,
+Arriostramiento, Cargas, Sismo):
+
 1. Defina la geometría, secciones, cargas y parámetros sísmicos (ciudad
    → Aa/Av se autocompletan según NSR-10) en el panel izquierdo.
 2. **Construir modelo** → genera y muestra la estantería en 3D.
@@ -143,6 +148,14 @@ python3 main.py
    colorea cada elemento según su relación demanda/capacidad (verde =
    holgado, amarillo = ajustado ≥0.9, rojo = no cumple >1.0).
 4. **Exportar memoria de cálculo** → guarda el reporte `.docx`.
+5. **Recomendaciones IA** (pestaña junto a "Resultados") → envía un
+   resumen numérico del chequeo (elementos más críticos, parámetros
+   sísmicos, conteo de fallas) a un modelo LLM a través de la API de
+   [Groq](https://console.groq.com/keys) y muestra recomendaciones de
+   ingeniería en lenguaje natural. Requiere una API key gratuita de Groq
+   (campo en el panel, o variable de entorno `GROQ_API_KEY`) y conexión a
+   internet; es una ayuda de lectura rápida de resultados, **no** un
+   chequeo normativo ni un sustituto del criterio del calculista.
 
 **Ejemplo de línea de comandos** (reconstruye un caso de referencia y
 genera su memoria de cálculo):
@@ -167,7 +180,8 @@ vortex/
   analysis/   elemento de pórtico 3D, condensación de conexiones, ensamblaje y solución
   design/     verificación de parales, vigas, placas base/anclajes, diagonales
   report/     generador de memoria de cálculo (.docx)
-  gui/        aplicación de escritorio (PySide6 + visor 3D)
+  gui/        aplicación de escritorio (PySide6 + visor 3D + tema visual)
+  ai/         asesor de IA (Groq) para recomendaciones sobre los resultados
 tests/        pruebas unitarias y de validación
 examples/     ejemplo de extremo a extremo
 ```

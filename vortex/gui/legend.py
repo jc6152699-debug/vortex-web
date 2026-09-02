@@ -36,7 +36,7 @@ class ColorLegend(QtWidgets.QWidget):
         self.lbl_mid.setAlignment(QtCore.Qt.AlignCenter)
         self.lbl_max.setAlignment(QtCore.Qt.AlignRight)
         for lbl in (self.lbl_min, self.lbl_mid, self.lbl_max):
-            lbl.setStyleSheet("font-size: 10px; color: #555;")
+            lbl.setStyleSheet("font-size: 10px; color: #96a1ad;")
         labels_row.addWidget(self.lbl_min)
         labels_row.addWidget(self.lbl_mid, 1)
         labels_row.addWidget(self.lbl_max)

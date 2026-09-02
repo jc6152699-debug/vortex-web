@@ -1,0 +1,85 @@
+"""
+Pruebas del asesor de IA (`vortex.ai.advisor`): el resumen de resultados
+se construye sin red, y la llamada a la API de Groq se valida con
+`requests.post` remplazado por un doble de prueba (sin salir a internet).
+"""
+import pytest
+
+from vortex.geometry import RackParameters, build_selective_rack
+from vortex.sections.catalog import default_catalog
+from vortex.analysis import PipelineInputs, SeismicInputs, run_full_check
+from vortex.units import kgf_to_kn
+from vortex.ai import advisor
+from vortex.ai.advisor import AdvisorError, build_results_summary, get_recommendations
+
+
+def _build():
+    catalog = default_catalog()
+    params = RackParameters(
+        n_bays=2, bay_length=2.44, frame_depth=1.06, level_heights=[1.20, 1.80, 1.80],
+        upright_section=catalog["PARAL 122x2.5mm"],
+        beam_section=catalog["VIGA CAJA 160x60x1.5mm"],
+        brace_section=catalog["DIAGONAL TUBULAR 30x30x2.0mm"],
+        base_fixity="pinned",
+    )
+    model = build_selective_rack(params)
+    inputs = PipelineInputs(
+        pl_per_level_kn=kgf_to_kn(2400.0), ll_kn_m2=0.0,
+        seismic=SeismicInputs(soil_type="D", aa=0.15, av=0.20),
+    )
+    result = run_full_check(model, inputs)
+    return model, result, inputs
+
+
+def test_build_results_summary_contains_key_numbers():
+    model, result, inputs = _build()
+    summary = build_results_summary(model, result, inputs, n_worst=5)
+    assert "Aa=0.15" in summary
+    assert "Elementos verificados" in summary
+    assert summary.count("\n") >= 5  # cabecera + hasta 5 filas de elementos críticos
+
+
+def test_get_recommendations_without_api_key_raises():
+    with pytest.raises(AdvisorError):
+        get_recommendations("resumen de prueba", api_key="")
+
+
+def test_get_recommendations_success(monkeypatch):
+    class _FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "  Recomendación de prueba.  "}}]}
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        assert url == advisor.GROQ_API_URL
+        assert headers["Authorization"] == "Bearer test-key"
+        return _FakeResponse()
+
+    monkeypatch.setattr(advisor.requests, "post", _fake_post)
+    text = get_recommendations("resumen", api_key="test-key")
+    assert text == "Recomendación de prueba."
+
+
+def test_get_recommendations_http_error(monkeypatch):
+    class _FakeResponse:
+        status_code = 401
+        text = "unauthorized"
+
+        def json(self):
+            raise AssertionError("no debería llamarse json() en un error HTTP")
+
+    monkeypatch.setattr(advisor.requests, "post", lambda *a, **k: _FakeResponse())
+    with pytest.raises(AdvisorError, match="inválida"):
+        get_recommendations("resumen", api_key="bad-key")
+
+
+def test_get_recommendations_network_error(monkeypatch):
+    import requests
+
+    def _raise(*a, **k):
+        raise requests.exceptions.ConnectionError("sin red")
+
+    monkeypatch.setattr(advisor.requests, "post", _raise)
+    with pytest.raises(AdvisorError, match="red"):
+        get_recommendations("resumen", api_key="test-key")
